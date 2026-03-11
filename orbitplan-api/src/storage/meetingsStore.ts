@@ -166,6 +166,8 @@ const mapMeetingDetail = (record: NonNullable<MeetingRecord>) => ({
   chatMessages: record.chatMessages.map(mapChatMessage),
 });
 
+export type MeetingDetail = ReturnType<typeof mapMeetingDetail>;
+
 export const createMeeting = async (input: MeetingCreateDTO): Promise<Meeting> => {
   const meeting = await prisma.meeting.create({
     data: {
@@ -508,6 +510,36 @@ export const confirmMeetingActions = async (meetingId: string, confirmed: boolea
   });
 
   return getMeetingById(meetingId);
+};
+
+export const createMeetingEmailLogs = async (
+  meetingId: string,
+  entries: Array<{
+    recipient: string;
+    type: "summary" | "action";
+    payload: Record<string, string>;
+  }>,
+): Promise<EmailLog[]> => {
+  if (entries.length === 0) return [];
+
+  const createdLogs: EmailLog[] = [];
+  const now = new Date();
+
+  for (const entry of entries) {
+    const created = await prisma.emailLog.create({
+      data: {
+        id: crypto.randomUUID(),
+        meetingId,
+        recipient: entry.recipient,
+        type: entry.type,
+        payload: entry.payload,
+        sentAt: now,
+      },
+    });
+    createdLogs.push(mapEmailLog(created));
+  }
+
+  return createdLogs;
 };
 
 export const linkActionToJiraIssue = async (

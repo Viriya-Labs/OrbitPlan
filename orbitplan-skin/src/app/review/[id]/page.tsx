@@ -6,8 +6,10 @@ import { AnimatePresence, motion } from "framer-motion";
 import { jsPDF } from "jspdf";
 import { useParams } from "next/navigation";
 import { RequireAuth } from "@/components/auth/require-auth";
-import { MultiStepLoader } from "@/components/aceternity/multi-step-loader";
 import { Tabs } from "@/components/aceternity/tabs";
+import { EmailExecutionPanel } from "@/components/review/email-execution-panel";
+import { ExecutionHubModal } from "@/components/review/execution-hub-modal";
+import { JiraExecutionPanel } from "@/components/review/jira-execution-panel";
 import { AppShell } from "@/components/layout/app-shell";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -19,6 +21,7 @@ import {
   confirmMeetingActions,
   deleteMeetingAction,
   disconnectJira,
+  exportMeetingToEmail,
   exportMeetingToJira,
   getMeeting,
   getMeetingChatHistory,
@@ -36,6 +39,7 @@ import {
 } from "@/lib/api";
 import type { ActionPriority, ActionStatus } from "@/types/action";
 import type { ChatMessage } from "@/types/chat";
+import type { EmailExportResult, EmailRecipientMode, ExecutionDestination } from "@/types/execution";
 import type {
   JiraCreateFieldMeta,
   JiraIssueTypeCreateMeta,
@@ -60,6 +64,38 @@ type TicketFormatPreset = "enterprise" | "engineering" | "operations" | "complia
 type SettingsPanelTab = "export-target" | "project" | "formats" | "fields" | "automation";
 type ActionViewFilter = "all" | ActionStatus;
 type JiraExportStage = "idle" | "scanning" | "blocked" | "exporting" | "complete";
+type EmailExportStage = "idle" | "exporting" | "complete";
+type ExecutionHubTab = ExecutionDestination;
+type JiraExecutionState = {
+  stage: JiraExportStage;
+  exporting: boolean;
+  result: JiraExportResult | null;
+  scanResult: JiraScanResult | null;
+  config: {
+    cloudId: string;
+    projectKey: string;
+    ticketDetails: JiraTicketDetailsDraft;
+    dynamicFieldValues: JiraDynamicFieldValues;
+    lookupQueries: Record<string, string>;
+    lookupResults: Record<string, JiraLookupItem[]>;
+    lookupLoading: Record<string, boolean>;
+  };
+};
+type EmailExecutionState = {
+  stage: EmailExportStage;
+  exporting: boolean;
+  result: EmailExportResult | null;
+  config: {
+    recipientMode: EmailRecipientMode;
+    customRecipients: string;
+    subject: string;
+  };
+};
+type ExecutionState = {
+  activeDestination: ExecutionHubTab;
+  jira: JiraExecutionState;
+  email: EmailExecutionState;
+};
 type JiraTicketDetailsDraft = {
   issueType: string;
   labelsText: string;
@@ -102,6 +138,57 @@ const TICKET_FORMAT_PRESETS: Array<{
     sections: ["Control objective", "Risk", "Evidence", "Approval trail"],
   },
 ];
+const STEP_FOUR_DELIVERY_OPTIONS: Array<{
+  id: TicketFormatPreset;
+  title: string;
+  detail: string;
+  accentClass: string;
+}> = [
+  {
+    id: "engineering",
+    title: "Engineering",
+    detail: "Implementation-focused Jira delivery for product and engineering teams.",
+    accentClass:
+      "border-[rgba(108,242,255,0.26)] bg-[linear-gradient(135deg,rgba(108,242,255,0.1)_0%,rgba(30,123,255,0.08)_100%)] hover:border-[rgba(108,242,255,0.42)]",
+  },
+  {
+    id: "enterprise",
+    title: "General",
+    detail: "Balanced Jira tickets for broader business and cross-functional work.",
+    accentClass:
+      "border-[rgba(120,145,255,0.24)] bg-[linear-gradient(135deg,rgba(120,145,255,0.1)_0%,rgba(255,255,255,0.04)_100%)] hover:border-[rgba(120,145,255,0.38)]",
+  },
+  {
+    id: "operations",
+    title: "Operations",
+    detail: "Operational handoff format for support, rollout, and internal execution.",
+    accentClass:
+      "border-[rgba(255,213,106,0.26)] bg-[linear-gradient(135deg,rgba(255,213,106,0.1)_0%,rgba(30,123,255,0.08)_100%)] hover:border-[rgba(255,213,106,0.42)]",
+  },
+  {
+    id: "compliance",
+    title: "Compliance",
+    detail: "Controlled export format for regulated and audit-heavy workflows.",
+    accentClass:
+      "border-[rgba(255,107,122,0.26)] bg-[linear-gradient(135deg,rgba(255,107,122,0.1)_0%,rgba(143,56,255,0.08)_100%)] hover:border-[rgba(255,107,122,0.42)]",
+  },
+];
+const EXECUTION_DESTINATION_OPTIONS: Array<{
+  id: ExecutionDestination;
+  title: string;
+  detail: string;
+}> = [
+  {
+    id: "jira",
+    title: "Jira",
+    detail: "Create linked execution tickets for product, engineering, and operations work.",
+  },
+  {
+    id: "email",
+    title: "Email",
+    detail: "Send an action-plan follow-up to attendees, owners, or custom recipients.",
+  },
+];
 const JIRA_EXPORT_LOADING_STATES = [
   {
     title: "Scanning",
@@ -124,6 +211,34 @@ const DEFAULT_JIRA_TICKET_DETAILS: JiraTicketDetailsDraft = {
   environment: "",
   additionalContext: "",
   advancedFieldsJson: "",
+};
+const DEFAULT_EXECUTION_STATE: ExecutionState = {
+  activeDestination: "jira",
+  jira: {
+    stage: "idle",
+    exporting: false,
+    result: null,
+    scanResult: null,
+    config: {
+      cloudId: "",
+      projectKey: "",
+      ticketDetails: DEFAULT_JIRA_TICKET_DETAILS,
+      dynamicFieldValues: {},
+      lookupQueries: {},
+      lookupResults: {},
+      lookupLoading: {},
+    },
+  },
+  email: {
+    stage: "idle",
+    exporting: false,
+    result: null,
+    config: {
+      recipientMode: "attendees",
+      customRecipients: "",
+      subject: "",
+    },
+  },
 };
 
 const ACTION_STATUS_OPTIONS: Array<{ value: ActionStatus; label: string }> = [
@@ -204,6 +319,27 @@ const platformStateMeta: Record<
     label: "Not Connected",
     tone: "neutral",
     description: "This platform is not linked for ticket sync yet.",
+  },
+};
+
+const executionDestinationStateMeta: Record<
+  "ready" | "attention" | "available",
+  { label: string; tone: "neutral" | "success" | "warning"; description: string }
+> = {
+  ready: {
+    label: "Ready",
+    tone: "success",
+    description: "This destination is configured and can be used from the execution hub.",
+  },
+  attention: {
+    label: "Needs Setup",
+    tone: "warning",
+    description: "This destination is available, but still needs configuration before delivery.",
+  },
+  available: {
+    label: "Available",
+    tone: "neutral",
+    description: "This destination is available from the execution hub.",
   },
 };
 
@@ -298,17 +434,11 @@ export default function ReviewPage() {
   const [jiraStatus, setJiraStatus] = useState<JiraIntegrationStatus | null>(null);
   const [jiraSites, setJiraSites] = useState<JiraSite[]>([]);
   const [jiraProjects, setJiraProjects] = useState<JiraProject[]>([]);
-  const [jiraCloudId, setJiraCloudId] = useState("");
-  const [jiraProjectKey, setJiraProjectKey] = useState("");
   const [jiraLoading, setJiraLoading] = useState(false);
   const [jiraDisconnecting, setJiraDisconnecting] = useState(false);
-  const [jiraExporting, setJiraExporting] = useState(false);
-  const [jiraResult, setJiraResult] = useState<JiraExportResult | null>(null);
-  const [jiraScanResult, setJiraScanResult] = useState<JiraScanResult | null>(null);
-  const [jiraExportStage, setJiraExportStage] = useState<JiraExportStage>("idle");
+  const [executionState, setExecutionState] = useState<ExecutionState>(DEFAULT_EXECUTION_STATE);
   const [jiraExportModalOpen, setJiraExportModalOpen] = useState(false);
   const [jiraConnectedNotice, setJiraConnectedNotice] = useState(false);
-  const [deliveryOptionSelected, setDeliveryOptionSelected] = useState(false);
   const [activeSidebarTool, setActiveSidebarTool] = useState<ReviewSidebarTool | null>(null);
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("summary");
   const [downloadFormat, setDownloadFormat] = useState<DownloadFormat>("txt");
@@ -316,13 +446,8 @@ export default function ReviewPage() {
   const [settingsPanelTab, setSettingsPanelTab] = useState<SettingsPanelTab>("formats");
   const [actionViewFilter, setActionViewFilter] = useState<ActionViewFilter>("all");
   const [expandedActionId, setExpandedActionId] = useState<string | null>(null);
-  const [jiraTicketDetails, setJiraTicketDetails] = useState<JiraTicketDetailsDraft>(DEFAULT_JIRA_TICKET_DETAILS);
   const [jiraIssueTypes, setJiraIssueTypes] = useState<JiraIssueTypeCreateMeta[]>([]);
   const [jiraCreateMetaLoading, setJiraCreateMetaLoading] = useState(false);
-  const [jiraDynamicFieldValues, setJiraDynamicFieldValues] = useState<JiraDynamicFieldValues>({});
-  const [jiraLookupQueries, setJiraLookupQueries] = useState<Record<string, string>>({});
-  const [jiraLookupResults, setJiraLookupResults] = useState<Record<string, JiraLookupItem[]>>({});
-  const [jiraLookupLoading, setJiraLookupLoading] = useState<Record<string, boolean>>({});
   const chatViewportRef = useRef<HTMLDivElement | null>(null);
   const hasSeededChatRef = useRef(false);
   const previousChatMessageIdsRef = useRef<string[]>([]);
@@ -333,6 +458,19 @@ export default function ReviewPage() {
   const jiraConnectPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const selectedTicketFormat =
     TICKET_FORMAT_PRESETS.find((preset) => preset.id === ticketFormatPreset) ?? TICKET_FORMAT_PRESETS[0];
+  const executionHubTab = executionState.activeDestination;
+  const jiraExecutionState = executionState.jira;
+  const emailExecutionState = executionState.email;
+  const jiraCloudId = jiraExecutionState.config.cloudId;
+  const jiraProjectKey = jiraExecutionState.config.projectKey;
+  const jiraTicketDetails = jiraExecutionState.config.ticketDetails;
+  const jiraDynamicFieldValues = jiraExecutionState.config.dynamicFieldValues;
+  const jiraLookupQueries = jiraExecutionState.config.lookupQueries;
+  const jiraLookupResults = jiraExecutionState.config.lookupResults;
+  const jiraLookupLoading = jiraExecutionState.config.lookupLoading;
+  const emailRecipientMode = emailExecutionState.config.recipientMode;
+  const emailCustomRecipients = emailExecutionState.config.customRecipients;
+  const emailSubject = emailExecutionState.config.subject;
   const jiraLabels = jiraTicketDetails.labelsText
     .split(",")
     .map((label) => label.trim())
@@ -341,19 +479,43 @@ export default function ReviewPage() {
     .split(",")
     .map((component) => component.trim())
     .filter(Boolean);
+  const emailRecipients = emailCustomRecipients
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
   const selectedJiraIssueType =
     jiraIssueTypes.find((issueType) => issueType.name === jiraTicketDetails.issueType || issueType.id === jiraTicketDetails.issueType) ?? null;
   const selectedJiraSite = jiraSites.find((site) => site.id === jiraCloudId) ?? null;
   const linkedActionCount = data?.actions.filter((action) => action.jiraIssueKey && action.jiraCloudId).length ?? 0;
   const allActionsAlreadyLinked = Boolean(data && data.actions.length > 0 && linkedActionCount === data.actions.length);
-  const showDeliveryStep =
-    deliveryOptionSelected || linkedActionCount > 0 || jiraExportStage !== "idle" || Boolean(jiraResult?.issues.length);
+  const updateJiraConfig = (
+    updater: (current: ExecutionState["jira"]["config"]) => ExecutionState["jira"]["config"],
+  ) => {
+    setExecutionState((current) => ({
+      ...current,
+      jira: {
+        ...current.jira,
+        config: updater(current.jira.config),
+      },
+    }));
+  };
+  const updateEmailConfig = (
+    updater: (current: ExecutionState["email"]["config"]) => ExecutionState["email"]["config"],
+  ) => {
+    setExecutionState((current) => ({
+      ...current,
+      email: {
+        ...current.email,
+        config: updater(current.email.config),
+      },
+    }));
+  };
   const jiraLoaderStep =
-    jiraExportStage === "exporting" || jiraExportStage === "complete"
+    jiraExecutionState.stage === "exporting" || jiraExecutionState.stage === "complete"
       ? 2
-      : jiraExportStage === "blocked"
+      : jiraExecutionState.stage === "blocked"
         ? 1
-        : jiraExportStage === "scanning"
+        : jiraExecutionState.stage === "scanning"
           ? 0
           : 0;
   const jiraDynamicFields = (selectedJiraIssueType?.fields ?? []).filter(
@@ -371,21 +533,42 @@ export default function ReviewPage() {
           : "Connect Jira to push approved actions into a project.",
     },
     {
-      name: "Linear",
-      state: "not_connected" as const,
-      detail: "Not wired into this workspace yet.",
-    },
-    {
-      name: "Asana",
-      state: "not_connected" as const,
-      detail: "Not wired into this workspace yet.",
-    },
-    {
-      name: "Trello",
-      state: "not_connected" as const,
-      detail: "Not wired into this workspace yet.",
+      name: "Email",
+      state: "connected" as const,
+      detail:
+        emailExecutionState.result?.createdCount && emailExecutionState.result.createdCount > 0
+          ? `${emailExecutionState.result.createdCount} email log${emailExecutionState.result.createdCount === 1 ? "" : "s"} created from this meeting.`
+          : "Send follow-up execution plans to attendees, owners, or custom recipients.",
     },
   ];
+  const executionDestinationItems = [
+    {
+      name: "Jira Delivery",
+      state: !jiraStatus?.configured ? "attention" : jiraStatus.connected ? "ready" : "attention",
+      detail: !jiraStatus?.configured
+            ? "Jira OAuth still needs API configuration."
+            : jiraStatus.connected
+              ? "Connected and ready for issue creation, project field mapping, and sync."
+              : "Available once a Jira account is connected.",
+      actionLabel: jiraStatus?.connected ? "Open Jira" : "Connect Jira",
+      onAction: jiraStatus?.connected
+        ? () => {
+            setExecutionState((current) => ({ ...current, activeDestination: "jira" }));
+            setJiraExportModalOpen(true);
+          }
+        : () => void handleConnectJira(),
+    },
+    {
+      name: "Email Follow-Up",
+      state: "ready" as const,
+      detail: "Available now for structured action-plan follow-ups and handoff emails.",
+      actionLabel: "Open Email",
+      onAction: () => {
+        setExecutionState((current) => ({ ...current, activeDestination: "email" }));
+        setJiraExportModalOpen(true);
+      },
+    },
+  ] as const;
 
   const renderExecutionPanel = () => {
     if (!data) return null;
@@ -706,302 +889,133 @@ export default function ReviewPage() {
     });
   };
 
-  const renderJiraExportContent = () => (
-    <div className="space-y-4">
-      {!jiraStatus?.configured && (
-        <p className="text-sm text-[var(--text-secondary)]">
-          Set `JIRA_CLIENT_ID`, `JIRA_CLIENT_SECRET`, and `JIRA_REDIRECT_URI` in the API env first.
+  const renderExecutionProfileSelector = () => (
+    <div className="space-y-3 rounded-2xl border border-[rgba(120,145,255,0.18)] bg-[rgba(7,12,30,0.36)] p-4">
+      <div>
+        <p className="text-sm font-semibold text-[var(--text-primary)]">Execution Profile</p>
+        <p className="mt-1 text-xs text-[var(--text-secondary)]">
+          Choose how OrbitPlan should shape the output for this destination.
         </p>
-      )}
-
-      {jiraStatus?.configured && !jiraStatus.connected && (
-        <div className="space-y-3">
-          <p className="text-sm text-[var(--text-secondary)]">
-            Connect Jira first, then choose the destination project and export the confirmed actions from here.
-          </p>
-          <Button variant="secondary" onClick={handleConnectJira}>
-            Connect Jira
-          </Button>
-        </div>
-      )}
-
-      {jiraStatus?.configured && jiraStatus.connected && (
-        <div className="space-y-4">
-          {jiraConnectedNotice && (
-            <div className="rounded-xl border border-[rgba(56,255,179,0.35)] bg-[rgba(56,255,179,0.1)] p-3">
-              <p className="text-sm font-semibold text-[var(--text-primary)]">Jira connected successfully</p>
-            </div>
-          )}
-          {jiraExportStage === "complete" && (
-            <div className="rounded-2xl border border-[rgba(56,255,179,0.34)] bg-[linear-gradient(135deg,rgba(56,255,179,0.14)_0%,rgba(30,123,255,0.1)_100%)] p-4">
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-[rgba(56,255,179,0.34)] bg-[rgba(56,255,179,0.16)] text-[var(--success)]">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-5 w-5">
-                    <path d="m5 12 4 4L19 6" />
-                  </svg>
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-[var(--text-primary)]">Jira export completed</p>
-                  <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                    Tickets were created successfully and linked back to this meeting.
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div className="space-y-3">
-            <MultiStepLoader
-              loadingStates={JIRA_EXPORT_LOADING_STATES.map((item) => ({ ...item }))}
-              currentStep={jiraLoaderStep}
-              loading={jiraExportStage === "scanning" || jiraExportStage === "exporting"}
-              blocked={jiraExportStage === "blocked"}
-              blockedLabel="Export Gated"
-            />
-            <p className="text-sm text-[var(--text-secondary)]">
-              {jiraExportStage === "scanning" && "Scanning ticket quality and checking export blockers..."}
-              {jiraExportStage === "exporting" && "Scan passed. Sending approved tickets to Jira..."}
-              {jiraExportStage === "complete" && "Export completed successfully."}
-              {jiraExportStage === "blocked" && "Scan found blockers. Review the report below before exporting."}
-              {jiraExportStage === "idle" && "Submit to Jira will run a scan first, then export only if the scan passes."}
-            </p>
-          </div>
-
-          <div className="grid gap-3 xl:grid-cols-2">
-            <select
-              value={jiraCloudId}
-              onChange={(event) => setJiraCloudId(event.target.value)}
-              className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-              disabled={jiraLoading || jiraExporting}
+      </div>
+      <div className="grid gap-3 xl:grid-cols-2">
+        {STEP_FOUR_DELIVERY_OPTIONS.map((option) => {
+          const isSelected = ticketFormatPreset === option.id;
+          return (
+            <button
+              key={option.id}
+              type="button"
+              onClick={() => setTicketFormatPreset(option.id)}
+              className={`w-full rounded-2xl border p-3 text-left transition ${option.accentClass} ${
+                isSelected ? "shadow-[0_18px_34px_-28px_rgba(120,145,255,0.8)]" : ""
+              }`}
             >
-              {jiraSites.map((site) => (
-                <option key={site.id} value={site.id}>
-                  {site.name}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={jiraProjectKey}
-              onChange={(event) => setJiraProjectKey(event.target.value)}
-              className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-              disabled={jiraLoading || jiraExporting || jiraProjects.length === 0}
-            >
-              {jiraProjects.map((project) => (
-                <option key={project.id} value={project.key}>
-                  {project.key} - {project.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="space-y-4 rounded-2xl border border-[rgba(120,145,255,0.18)] bg-[rgba(7,12,30,0.36)] p-4">
-            <div>
-              <p className="text-sm font-semibold text-[var(--text-primary)]">Ticket fields</p>
-              <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                Configure the Jira payload here before scanning and export.
-              </p>
-            </div>
-
-            <div className="grid gap-4 xl:grid-cols-2 2xl:grid-cols-4">
-              <label className="space-y-2">
-                <span className="text-sm font-medium text-[var(--text-secondary)]">Issue Type</span>
-                {jiraIssueTypes.length > 0 ? (
-                  <select
-                    value={selectedJiraIssueType?.name ?? jiraTicketDetails.issueType}
-                    onChange={(event) => setJiraTicketDetails((current) => ({ ...current, issueType: event.target.value }))}
-                    className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                  >
-                    {jiraIssueTypes.map((issueType) => (
-                      <option key={issueType.id} value={issueType.name}>
-                        {issueType.name}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    value={jiraTicketDetails.issueType}
-                    onChange={(event) => setJiraTicketDetails((current) => ({ ...current, issueType: event.target.value }))}
-                    placeholder="Task"
-                    className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                  />
-                )}
-              </label>
-
-              <label className="space-y-2">
-                <span className="text-sm font-medium text-[var(--text-secondary)]">Labels</span>
-                <input
-                  value={jiraTicketDetails.labelsText}
-                  onChange={(event) => setJiraTicketDetails((current) => ({ ...current, labelsText: event.target.value }))}
-                  placeholder="orbitplan, customer-facing"
-                  className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                />
-              </label>
-
-              <label className="space-y-2">
-                <span className="text-sm font-medium text-[var(--text-secondary)]">Components</span>
-                <input
-                  value={jiraTicketDetails.componentsText}
-                  onChange={(event) => setJiraTicketDetails((current) => ({ ...current, componentsText: event.target.value }))}
-                  placeholder="Platform API, Admin UI"
-                  className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                />
-              </label>
-
-              <label className="space-y-2">
-                <span className="text-sm font-medium text-[var(--text-secondary)]">Environment</span>
-                <input
-                  value={jiraTicketDetails.environment}
-                  onChange={(event) => setJiraTicketDetails((current) => ({ ...current, environment: event.target.value }))}
-                  placeholder="Production, staging, internal admin"
-                  className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                />
-              </label>
-            </div>
-
-            <label className="block space-y-2">
-              <span className="text-sm font-medium text-[var(--text-secondary)]">Additional Context</span>
-              <textarea
-                value={jiraTicketDetails.additionalContext}
-                onChange={(event) => setJiraTicketDetails((current) => ({ ...current, additionalContext: event.target.value }))}
-                rows={4}
-                placeholder="Escalation notes, rollout constraints, customer impact, internal references..."
-                className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-              />
-            </label>
-
-            <div className="space-y-4 rounded-[24px] border border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.03)] p-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <p className="text-lg font-semibold text-[var(--text-primary)]">Detected Jira Fields</p>
-                  <p className="mt-1 text-sm text-[var(--text-secondary)]">
-                    {jiraCreateMetaLoading
-                      ? "Loading fields from Jira..."
-                      : selectedJiraIssueType
-                        ? `Fields available for ${selectedJiraIssueType.name} in ${jiraProjectKey}.`
-                        : "Select a Jira project to load create fields."}
-                  </p>
+                  <p className="text-sm font-semibold text-[var(--text-primary)]">{option.title}</p>
+                  <p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">{option.detail}</p>
                 </div>
-                {selectedJiraIssueType && (
-                  <span className="rounded-full border border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.04)] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-primary)]">
-                    {jiraDynamicFields.length} fields
-                  </span>
-                )}
-              </div>
-
-              {selectedJiraIssueType && jiraDynamicFields.length > 0 ? (
-                <div className="grid gap-4 xl:grid-cols-2 2xl:grid-cols-3">
-                  {jiraDynamicFields.map((field) => renderDynamicJiraField(field))}
-                </div>
-              ) : (
-                <p className="text-sm text-[var(--text-secondary)]">
-                  {selectedJiraIssueType
-                    ? "No extra Jira create fields were detected beyond the core fields already handled here."
-                    : "Connect Jira and choose a project to load project-specific fields."}
-                </p>
-              )}
-            </div>
-
-            <label className="block space-y-2">
-              <span className="text-sm font-medium text-[var(--text-secondary)]">Advanced Jira Fields JSON</span>
-              <textarea
-                value={jiraTicketDetails.advancedFieldsJson}
-                onChange={(event) => setJiraTicketDetails((current) => ({ ...current, advancedFieldsJson: event.target.value }))}
-                rows={8}
-                placeholder={'{"customfield_10011":"ENG","customfield_10020":8}'}
-                className="w-full rounded-xl border border-[var(--border)] bg-[rgba(7,12,30,0.7)] px-3 py-2 font-mono text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-              />
-              <p className="text-xs text-[var(--text-secondary)]">
-                Use this for custom Jira fields such as story points, team fields, epic links, request types, or any project-specific schema.
-              </p>
-            </label>
-          </div>
-
-          {!data?.meeting.actionsConfirmed && (
-            <p className="text-xs text-[var(--warning)]">Confirm the action plan before exporting.</p>
-          )}
-          {allActionsAlreadyLinked && (
-            <div className="rounded-xl border border-[rgba(56,255,179,0.24)] bg-[rgba(56,255,179,0.08)] p-3">
-              <p className="text-sm font-semibold text-[var(--text-primary)]">This meeting is already exported</p>
-              <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                All current actions are already linked to Jira. Use the Jira links below or the per-action resync controls if you need updates.
-              </p>
-            </div>
-          )}
-
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant="secondary"
-              onClick={handleExportToJira}
-              disabled={
-                jiraExporting ||
-                !data?.meeting.actionsConfirmed ||
-                !jiraCloudId ||
-                !jiraProjectKey ||
-                !data ||
-                data.actions.length === 0 ||
-                allActionsAlreadyLinked
-              }
-            >
-              {allActionsAlreadyLinked ? "Already Exported" : jiraExporting ? "Exporting..." : "Export To Jira"}
-            </Button>
-            <Button variant="ghost" onClick={() => void loadJiraState()} disabled={jiraLoading || jiraExporting}>
-              {jiraLoading ? "Refreshing Jira..." : "Refresh Jira"}
-            </Button>
-          </div>
-
-          {jiraScanResult && (
-            <div className="rounded-xl border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.03)] p-3">
-              <div className="flex flex-wrap items-center gap-3">
-                <p className="text-sm font-semibold text-[var(--text-primary)]">Scan report</p>
-                <span className="rounded-full border border-[rgba(56,255,179,0.3)] bg-[rgba(56,255,179,0.12)] px-2.5 py-1 text-xs font-medium text-[var(--success)]">
-                  Ready {jiraScanResult.readyCount}
-                </span>
-                <span className="rounded-full border border-[rgba(255,107,122,0.3)] bg-[rgba(255,107,122,0.12)] px-2.5 py-1 text-xs font-medium text-[var(--danger)]">
-                  Blocked {jiraScanResult.blockedCount}
+                <span
+                  className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] ${
+                    isSelected
+                      ? "border-[rgba(56,255,179,0.34)] bg-[rgba(56,255,179,0.14)] text-[var(--success)]"
+                      : "border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.04)] text-[var(--text-muted)]"
+                  }`}
+                >
+                  {isSelected ? "Active" : "Select"}
                 </span>
               </div>
-
-              {jiraScanResult.blockedCount > 0 && (
-                <div className="mt-3 space-y-2">
-                  {jiraScanResult.items
-                    .filter((item) => item.status === "blocked")
-                    .map((item) => (
-                      <div key={item.actionId} className="rounded-xl border border-[rgba(255,107,122,0.2)] bg-[rgba(255,107,122,0.06)] p-3">
-                        <p className="text-sm font-semibold text-[var(--text-primary)]">{item.description}</p>
-                        <div className="mt-2 space-y-1 text-xs text-[var(--text-secondary)]">
-                          {item.reasons.map((reason) => (
-                            <p key={`${item.actionId}-${reason}`}>- {reason}</p>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {jiraResult && (
-            <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] p-3">
-              <p className="text-sm font-semibold text-[var(--text-primary)]">Created {jiraResult.createdCount} Jira issues</p>
-              <div className="mt-2 space-y-1 text-xs">
-                {jiraResult.issues.map((issue) => (
-                  <a
-                    key={issue.key}
-                    href={issue.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="block text-[var(--accent)] hover:underline"
-                  >
-                    {issue.key}
-                  </a>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+            </button>
+          );
+        })}
+      </div>
     </div>
+  );
+
+  const renderJiraExportContent = () => (
+    <JiraExecutionPanel
+      profileSelector={renderExecutionProfileSelector()}
+      jiraStatus={jiraStatus}
+      jiraConnectedNotice={jiraConnectedNotice}
+      jiraStage={jiraExecutionState.stage}
+      jiraExporting={jiraExecutionState.exporting}
+      jiraLoaderStep={jiraLoaderStep}
+      jiraCloudId={jiraCloudId}
+      jiraProjectKey={jiraProjectKey}
+      jiraSites={jiraSites}
+      jiraProjects={jiraProjects}
+      jiraLoading={jiraLoading}
+      jiraIssueTypes={jiraIssueTypes}
+      selectedJiraIssueType={selectedJiraIssueType}
+      jiraTicketDetails={jiraTicketDetails}
+      jiraCreateMetaLoading={jiraCreateMetaLoading}
+      jiraDynamicFields={jiraDynamicFields}
+      allActionsAlreadyLinked={allActionsAlreadyLinked}
+      actionsConfirmed={Boolean(data?.meeting.actionsConfirmed)}
+      hasActions={Boolean(data && data.actions.length > 0)}
+      jiraScanResult={jiraExecutionState.scanResult}
+      jiraResult={jiraExecutionState.result}
+      loadingStates={JIRA_EXPORT_LOADING_STATES}
+      renderDynamicJiraField={renderDynamicJiraField}
+      onConnectJira={handleConnectJira}
+      onRefreshJira={() => void loadJiraState()}
+      onExportToJira={handleExportToJira}
+      onCloudChange={(value) => updateJiraConfig((current) => ({ ...current, cloudId: value }))}
+      onProjectChange={(value) => updateJiraConfig((current) => ({ ...current, projectKey: value }))}
+      onIssueTypeChange={(value) =>
+        updateJiraConfig((current) => ({
+          ...current,
+          ticketDetails: { ...current.ticketDetails, issueType: value },
+        }))
+      }
+      onLabelsChange={(value) =>
+        updateJiraConfig((current) => ({
+          ...current,
+          ticketDetails: { ...current.ticketDetails, labelsText: value },
+        }))
+      }
+      onComponentsChange={(value) =>
+        updateJiraConfig((current) => ({
+          ...current,
+          ticketDetails: { ...current.ticketDetails, componentsText: value },
+        }))
+      }
+      onEnvironmentChange={(value) =>
+        updateJiraConfig((current) => ({
+          ...current,
+          ticketDetails: { ...current.ticketDetails, environment: value },
+        }))
+      }
+      onAdditionalContextChange={(value) =>
+        updateJiraConfig((current) => ({
+          ...current,
+          ticketDetails: { ...current.ticketDetails, additionalContext: value },
+        }))
+      }
+      onAdvancedFieldsChange={(value) =>
+        updateJiraConfig((current) => ({
+          ...current,
+          ticketDetails: { ...current.ticketDetails, advancedFieldsJson: value },
+        }))
+      }
+    />
+  );
+
+  const renderEmailExportContent = () => (
+    <EmailExecutionPanel
+      profileSelector={renderExecutionProfileSelector()}
+      emailRecipientMode={emailRecipientMode}
+      emailSubject={emailSubject}
+      emailCustomRecipients={emailCustomRecipients}
+      emailExporting={emailExecutionState.exporting}
+      emailResult={emailExecutionState.result}
+      selectedTicketFormatLabel={selectedTicketFormat.label}
+      actionsConfirmed={Boolean(data?.meeting.actionsConfirmed)}
+      hasActions={Boolean(data && data.actions.length > 0)}
+      onRecipientModeChange={(value) => updateEmailConfig((current) => ({ ...current, recipientMode: value }))}
+      onSubjectChange={(value) => updateEmailConfig((current) => ({ ...current, subject: value }))}
+      onCustomRecipientsChange={(value) => updateEmailConfig((current) => ({ ...current, customRecipients: value }))}
+      onExportToEmail={handleExportToEmail}
+    />
   );
 
   const renderActionPlanFlowchart = () => {
@@ -1009,37 +1023,6 @@ export default function ReviewPage() {
 
     const jiraProjectUrl =
       selectedJiraSite && jiraProjectKey ? `${selectedJiraSite.url.replace(/\/$/, "")}/projects/${jiraProjectKey}` : null;
-    const stepFourOptions = [
-      {
-        id: "engineering" as TicketFormatPreset,
-        title: "Engineering Tickets",
-        detail: "Use implementation-focused Jira tickets for product and engineering delivery.",
-        accentClass:
-          "border-[rgba(108,242,255,0.26)] bg-[linear-gradient(135deg,rgba(108,242,255,0.1)_0%,rgba(30,123,255,0.08)_100%)] hover:border-[rgba(108,242,255,0.42)]",
-      },
-      {
-        id: "enterprise" as TicketFormatPreset,
-        title: "General Work Intake",
-        detail: "Use balanced Jira tickets for cross-functional business or general project work.",
-        accentClass:
-          "border-[rgba(120,145,255,0.24)] bg-[linear-gradient(135deg,rgba(120,145,255,0.1)_0%,rgba(255,255,255,0.04)_100%)] hover:border-[rgba(120,145,255,0.38)]",
-      },
-      {
-        id: "operations" as TicketFormatPreset,
-        title: "Operations Handoff",
-        detail: "Use operational Jira tickets for support, rollout, or internal handoff workflows.",
-        accentClass:
-          "border-[rgba(255,213,106,0.26)] bg-[linear-gradient(135deg,rgba(255,213,106,0.1)_0%,rgba(30,123,255,0.08)_100%)] hover:border-[rgba(255,213,106,0.42)]",
-      },
-      {
-        id: "compliance" as TicketFormatPreset,
-        title: "Compliance Review",
-        detail: "Use controlled Jira tickets for regulated, audit, or approval-heavy workflows.",
-        accentClass:
-          "border-[rgba(255,107,122,0.26)] bg-[linear-gradient(135deg,rgba(255,107,122,0.1)_0%,rgba(143,56,255,0.08)_100%)] hover:border-[rgba(255,107,122,0.42)]",
-      },
-    ];
-
     const workflowSteps = [
       {
         key: "captured",
@@ -1059,25 +1042,28 @@ export default function ReviewPage() {
         detail: data.meeting.status === "approved" ? "Approved" : data.meeting.status === "ready" ? "Awaiting approval" : "Still in review",
         isComplete: data.meeting.status === "approved",
       },
-    ];
-    if (showDeliveryStep) {
-      workflowSteps.push({
+      {
         key: "delivery",
-        label: "Jira Delivery",
-        detail: jiraCloudId && jiraProjectKey ? "Export path configured" : "Project target not selected",
-        isComplete: Boolean(jiraCloudId && jiraProjectKey),
-      });
-    }
+        label: "Execution Destination",
+        detail:
+          executionHubTab === "jira"
+            ? jiraCloudId && jiraProjectKey
+              ? `Jira configured with ${selectedTicketFormat.label}`
+              : "Open the execution hub to configure Jira or Email delivery"
+            : `Email configured with ${selectedTicketFormat.label}`,
+        isComplete: executionHubTab === "jira" ? Boolean(jiraCloudId && jiraProjectKey) : Boolean(emailExecutionState.result?.createdCount),
+      },
+    ];
 
     return (
       <Card title="Action Plan Flow" subtitle="Visual map of the current delivery path">
         <div className="space-y-6">
-          <div className={`grid gap-3 ${showDeliveryStep ? "xl:grid-cols-4" : "xl:grid-cols-3"}`}>
+          <div className="grid gap-3 xl:grid-cols-4">
             {workflowSteps.map((step, index) => (
               <div
                 key={step.key}
                 className={`relative rounded-[24px] border p-4 ${
-                  step.key === "delivery" && jiraExportStage === "complete"
+                  step.key === "delivery" && jiraExecutionState.stage === "complete"
                     ? "border-[rgba(56,255,179,0.3)] bg-[linear-gradient(135deg,rgba(56,255,179,0.12)_0%,rgba(30,123,255,0.12)_100%)] shadow-[0_20px_42px_-30px_rgba(56,255,179,0.7)]"
                     : "border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.03)]"
                 }`}
@@ -1092,14 +1078,14 @@ export default function ReviewPage() {
                   </div>
                   <span
                     className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] ${
-                      step.key === "delivery" && jiraExportStage === "complete"
+                      step.key === "delivery" && jiraExecutionState.stage === "complete"
                         ? "border-[rgba(56,255,179,0.36)] bg-[rgba(56,255,179,0.16)] text-[var(--success)]"
                         : step.isComplete
                           ? "border-[rgba(56,255,179,0.34)] bg-[rgba(56,255,179,0.12)] text-[var(--success)]"
                           : "border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.05)] text-[var(--text-muted)]"
                     }`}
                   >
-                    {step.key === "delivery" && jiraExportStage === "complete" ? "Exported" : step.isComplete ? "Active" : "Pending"}
+                    {step.key === "delivery" && jiraExecutionState.stage === "complete" ? "Exported" : step.isComplete ? "Active" : "Pending"}
                   </span>
                 </div>
                 <p className="mt-3 text-sm text-[var(--text-secondary)]">{step.detail}</p>
@@ -1107,17 +1093,14 @@ export default function ReviewPage() {
                   <div className="mt-4 flex flex-wrap gap-2">
                     <button
                       type="button"
-                      onClick={() => {
-                        setDeliveryOptionSelected(true);
-                        setJiraExportModalOpen(true);
-                      }}
+                      onClick={() => setJiraExportModalOpen(true)}
                       className={`inline-flex rounded-full border px-3 py-1.5 text-xs font-semibold transition hover:text-[var(--text-primary)] ${
-                        jiraExportStage === "complete"
+                        jiraExecutionState.stage === "complete"
                           ? "border-[rgba(56,255,179,0.34)] bg-[rgba(56,255,179,0.14)] text-[var(--success)]"
                           : "border-[rgba(108,242,255,0.28)] bg-[rgba(108,242,255,0.1)] text-[var(--accent)]"
                       }`}
                     >
-                      {jiraExportStage === "complete" ? `View ${selectedTicketFormat.label}` : `Open ${selectedTicketFormat.label}`}
+                      {jiraExecutionState.stage === "complete" && executionHubTab === "jira" ? `View ${selectedTicketFormat.label}` : "Open Execution Hub"}
                     </button>
                     {jiraProjectUrl && (
                       <a
@@ -1125,12 +1108,12 @@ export default function ReviewPage() {
                         target="_blank"
                         rel="noreferrer"
                         className={`inline-flex rounded-full border px-3 py-1.5 text-xs font-semibold transition hover:text-[var(--text-primary)] ${
-                          jiraExportStage === "complete"
+                          jiraExecutionState.stage === "complete"
                             ? "border-[rgba(56,255,179,0.28)] bg-[rgba(56,255,179,0.1)] text-[var(--success)]"
                             : "border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.04)] text-[var(--text-secondary)]"
                         }`}
                       >
-                        {jiraExportStage === "complete" ? "Open Exported Jira Project" : "Open Jira Project"}
+                        {jiraExecutionState.stage === "complete" ? "Open Exported Jira Project" : "Open Jira Project"}
                       </a>
                     )}
                   </div>
@@ -1138,45 +1121,6 @@ export default function ReviewPage() {
               </div>
             ))}
           </div>
-
-          {!showDeliveryStep && (
-            <div className="rounded-[26px] border border-[rgba(120,145,255,0.18)] bg-[linear-gradient(180deg,rgba(9,14,36,0.82)_0%,rgba(7,11,28,0.9)_100%)] p-4 sm:p-5">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--text-muted)]">Choose Delivery Path</p>
-                  <p className="mt-2 text-lg font-semibold text-[var(--text-primary)]">Pick how this meeting should turn into Jira work</p>
-                </div>
-                <span className="rounded-full border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.04)] px-3 py-1 text-xs font-medium text-[var(--text-secondary)]">
-                  Step 4 appears after selection
-                </span>
-              </div>
-
-              <div className="mt-4 grid gap-3 xl:grid-cols-2">
-                {stepFourOptions.map((option) => (
-                  <button
-                    key={option.id}
-                    type="button"
-                    onClick={() => {
-                      setTicketFormatPreset(option.id);
-                      setDeliveryOptionSelected(true);
-                      setJiraExportModalOpen(true);
-                    }}
-                    className={`w-full rounded-2xl border p-4 text-left transition ${option.accentClass}`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-semibold text-[var(--text-primary)]">{option.title}</p>
-                        <p className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">{option.detail}</p>
-                      </div>
-                      <span className="rounded-full border border-[rgba(120,145,255,0.2)] bg-[rgba(255,255,255,0.04)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
-                        Select
-                      </span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
 
           <div className="rounded-[26px] border border-[rgba(120,145,255,0.18)] bg-[linear-gradient(180deg,rgba(9,14,36,0.82)_0%,rgba(7,11,28,0.9)_100%)] p-4 sm:p-5">
             <div className="flex items-center justify-between gap-3">
@@ -1263,7 +1207,38 @@ export default function ReviewPage() {
 
   const renderIntegrationsPanel = () => (
     <div className="space-y-6">
-      <Card title="Platform Sync" subtitle="See whether your account is linked before sending tickets out">
+      <Card title="Execution Destinations" subtitle="Manage where OrbitPlan can send work after the meeting is ready">
+        <div className="grid gap-3">
+          {executionDestinationItems.map((destination) => {
+            const meta = executionDestinationStateMeta[destination.state];
+
+            return (
+              <div
+                key={destination.name}
+                className="flex items-start justify-between gap-3 rounded-2xl border border-[rgba(120,145,255,0.16)] bg-[linear-gradient(135deg,rgba(255,255,255,0.045)_0%,rgba(255,255,255,0.02)_100%)] p-4"
+              >
+                <div>
+                  <p className="text-sm font-semibold text-[var(--text-primary)]">{destination.name}</p>
+                  <p className="mt-1 text-xs text-[var(--text-secondary)]">{destination.detail}</p>
+                  <p className="mt-2 text-[11px] text-[var(--text-muted)]">{meta.description}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <StatusPill label={meta.label} tone={meta.tone} />
+                  <button
+                    type="button"
+                    onClick={destination.onAction}
+                    className="inline-flex items-center gap-2 rounded-full border border-[rgba(108,242,255,0.28)] bg-[rgba(108,242,255,0.1)] px-3 py-1.5 text-xs font-semibold text-[var(--accent)] transition hover:border-[rgba(108,242,255,0.44)] hover:bg-[rgba(108,242,255,0.16)] hover:text-[var(--text-primary)]"
+                  >
+                    {destination.actionLabel}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      <Card title="Platform Sync" subtitle="Connection status for integrations OrbitPlan uses behind the scenes">
         <div className="grid gap-3">
           {platformSyncItems.map((platform) => {
             const meta = platformStateMeta[platform.state];
@@ -1304,6 +1279,18 @@ export default function ReviewPage() {
                         <path d="M5 12h14" />
                       </svg>
                       {jiraDisconnecting ? "Unsyncing..." : "Unsync"}
+                    </button>
+                  )}
+                  {platform.name === "Email" && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setExecutionState((current) => ({ ...current, activeDestination: "email" }));
+                        setJiraExportModalOpen(true);
+                      }}
+                      className="inline-flex items-center gap-2 rounded-full border border-[rgba(120,145,255,0.24)] bg-[rgba(255,255,255,0.04)] px-3 py-1.5 text-xs font-semibold text-[var(--text-secondary)] transition hover:border-[rgba(120,145,255,0.4)] hover:text-[var(--text-primary)]"
+                    >
+                      Open
                     </button>
                   )}
                 </div>
@@ -1518,12 +1505,12 @@ export default function ReviewPage() {
           </div>
           <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-strong)] p-3">
             <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">Created Tickets</p>
-            <p className="mt-2 text-sm font-semibold text-[var(--text-primary)]">{jiraResult?.createdCount ?? 0}</p>
+              <p className="mt-2 text-sm font-semibold text-[var(--text-primary)]">{jiraExecutionState.result?.createdCount ?? 0}</p>
           </div>
         </div>
-        {jiraResult?.issues.length ? (
+        {jiraExecutionState.result?.issues.length ? (
           <div className="space-y-2">
-            {jiraResult.issues.map((issue) => (
+            {jiraExecutionState.result.issues.map((issue) => (
               <a
                 key={issue.key}
                 href={issue.url}
@@ -1536,7 +1523,7 @@ export default function ReviewPage() {
             ))}
           </div>
         ) : (
-          <p>No exported tickets yet. Use Integrations to connect Jira and export confirmed actions.</p>
+          <p>No exported tickets yet. Use Destinations to connect Jira and export confirmed actions.</p>
         )}
       </div>
     </Card>
@@ -1600,7 +1587,11 @@ export default function ReviewPage() {
       { label: "Transcript processed", done: Boolean(data?.transcript), detail: data?.transcript ? "Transcript ready" : "Not processed yet" },
       { label: "Actions confirmed", done: Boolean(data?.meeting.actionsConfirmed), detail: data?.meeting.actionsConfirmed ? "Confirmed" : "Pending confirmation" },
       { label: "Meeting approved", done: data?.meeting.status === "approved", detail: data?.meeting.status === "approved" ? "Approved" : "Not approved yet" },
-      { label: "Tickets exported", done: Boolean(jiraResult?.issues.length), detail: jiraResult?.issues.length ? `${jiraResult.issues.length} issues created` : "No export yet" },
+      {
+        label: "Tickets exported",
+        done: Boolean(jiraExecutionState.result?.issues.length),
+        detail: jiraExecutionState.result?.issues.length ? `${jiraExecutionState.result.issues.length} issues created` : "No export yet",
+      },
     ];
 
     return (
@@ -1714,7 +1705,7 @@ export default function ReviewPage() {
               <p className="text-lg font-semibold text-[var(--text-primary)]">Preferred Project</p>
               <p className="mt-3 text-lg font-semibold text-[var(--text-primary)]">{jiraProjectKey || "No Jira project selected yet"}</p>
               <p className="mt-2 text-sm text-[var(--text-secondary)]">
-                Pick a Jira site and project from the Integrations area. This setting reflects the current meeting target.
+                Pick a Jira site and project from the Destinations area. This setting reflects the current meeting target.
               </p>
             </div>
           );
@@ -1904,38 +1895,22 @@ export default function ReviewPage() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const storedValue = window.localStorage.getItem(`orbitplan:delivery-option-selected:${id}`);
-    if (storedValue === "true") {
-      setDeliveryOptionSelected(true);
-    }
-  }, [id]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(`orbitplan:delivery-option-selected:${id}`, deliveryOptionSelected ? "true" : "false");
-  }, [deliveryOptionSelected, id]);
-
-  useEffect(() => {
-    if (linkedActionCount > 0 || jiraExportStage !== "idle" || Boolean(jiraResult?.issues.length)) {
-      setDeliveryOptionSelected(true);
-    }
-  }, [jiraExportStage, jiraResult, linkedActionCount]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
     const storedValue = window.localStorage.getItem(`orbitplan:jira-ticket-details:${id}`);
     if (!storedValue) return;
     try {
       const parsed = JSON.parse(storedValue) as Partial<JiraTicketDetailsDraft & { dynamicFieldValues?: JiraDynamicFieldValues }>;
-      setJiraTicketDetails({
-        issueType: parsed.issueType?.trim() || DEFAULT_JIRA_TICKET_DETAILS.issueType,
-        labelsText: parsed.labelsText ?? DEFAULT_JIRA_TICKET_DETAILS.labelsText,
-        componentsText: parsed.componentsText ?? DEFAULT_JIRA_TICKET_DETAILS.componentsText,
-        environment: parsed.environment ?? DEFAULT_JIRA_TICKET_DETAILS.environment,
-        additionalContext: parsed.additionalContext ?? DEFAULT_JIRA_TICKET_DETAILS.additionalContext,
-        advancedFieldsJson: parsed.advancedFieldsJson ?? DEFAULT_JIRA_TICKET_DETAILS.advancedFieldsJson,
-      });
-      setJiraDynamicFieldValues(parsed.dynamicFieldValues ?? {});
+      updateJiraConfig((current) => ({
+        ...current,
+        ticketDetails: {
+          issueType: parsed.issueType?.trim() || DEFAULT_JIRA_TICKET_DETAILS.issueType,
+          labelsText: parsed.labelsText ?? DEFAULT_JIRA_TICKET_DETAILS.labelsText,
+          componentsText: parsed.componentsText ?? DEFAULT_JIRA_TICKET_DETAILS.componentsText,
+          environment: parsed.environment ?? DEFAULT_JIRA_TICKET_DETAILS.environment,
+          additionalContext: parsed.additionalContext ?? DEFAULT_JIRA_TICKET_DETAILS.additionalContext,
+          advancedFieldsJson: parsed.advancedFieldsJson ?? DEFAULT_JIRA_TICKET_DETAILS.advancedFieldsJson,
+        },
+        dynamicFieldValues: parsed.dynamicFieldValues ?? {},
+      }));
     } catch {
       window.localStorage.removeItem(`orbitplan:jira-ticket-details:${id}`);
     }
@@ -1961,25 +1936,35 @@ export default function ReviewPage() {
       if (!status.connected) {
         setJiraSites([]);
         setJiraProjects([]);
-        setJiraCloudId("");
-        setJiraProjectKey("");
+        updateJiraConfig((current) => ({
+          ...current,
+          cloudId: "",
+          projectKey: "",
+        }));
         return;
       }
 
       const sites = await getJiraSites();
       setJiraSites(sites);
       const selectedCloudId = jiraCloudId && sites.some((site) => site.id === jiraCloudId) ? jiraCloudId : (sites[0]?.id ?? "");
-      setJiraCloudId(selectedCloudId);
 
       if (selectedCloudId) {
         const projects = await getJiraProjects(selectedCloudId);
         setJiraProjects(projects);
         const selectedProjectKey =
           jiraProjectKey && projects.some((project) => project.key === jiraProjectKey) ? jiraProjectKey : (projects[0]?.key ?? "");
-        setJiraProjectKey(selectedProjectKey);
+        updateJiraConfig((current) => ({
+          ...current,
+          cloudId: selectedCloudId,
+          projectKey: selectedProjectKey,
+        }));
       } else {
         setJiraProjects([]);
-        setJiraProjectKey("");
+        updateJiraConfig((current) => ({
+          ...current,
+          cloudId: "",
+          projectKey: "",
+        }));
       }
     } catch (jiraError) {
       setError(jiraError instanceof Error ? jiraError.message : "Failed to load Jira integration");
@@ -2002,7 +1987,10 @@ export default function ReviewPage() {
         const projects = await getJiraProjects(jiraCloudId);
         if (!isMounted) return;
         setJiraProjects(projects);
-        setJiraProjectKey(projects[0]?.key ?? "");
+        updateJiraConfig((current) => ({
+          ...current,
+          projectKey: projects[0]?.key ?? "",
+        }));
       } catch (jiraError) {
         if (isMounted) setError(jiraError instanceof Error ? jiraError.message : "Failed to load Jira projects");
       }
@@ -2029,7 +2017,13 @@ export default function ReviewPage() {
         setJiraIssueTypes(issueTypes);
         if (!issueTypes.some((issueType) => issueType.name === jiraTicketDetails.issueType || issueType.id === jiraTicketDetails.issueType)) {
           const fallback = issueTypes[0]?.name ?? "Task";
-          setJiraTicketDetails((current) => ({ ...current, issueType: fallback }));
+          updateJiraConfig((current) => ({
+            ...current,
+            ticketDetails: {
+              ...current.ticketDetails,
+              issueType: fallback,
+            },
+          }));
         }
       } catch (jiraMetaError) {
         if (isMounted) setError(jiraMetaError instanceof Error ? jiraMetaError.message : "Failed to load Jira field metadata");
@@ -2284,11 +2278,14 @@ export default function ReviewPage() {
     setError(null);
     try {
       await disconnectJira();
-      setJiraCloudId("");
-      setJiraProjectKey("");
       setJiraProjects([]);
       setJiraSites([]);
       setJiraStatus((current) => (current ? { ...current, connected: false } : current));
+      updateJiraConfig((current) => ({
+        ...current,
+        cloudId: "",
+        projectKey: "",
+      }));
       await loadJiraState();
     } catch (disconnectError) {
       setError(disconnectError instanceof Error ? disconnectError.message : "Failed to disconnect Jira");
@@ -2312,9 +2309,12 @@ export default function ReviewPage() {
   };
 
   const setDynamicFieldValue = (fieldKey: string, value: string | string[]) => {
-    setJiraDynamicFieldValues((current) => ({
+    updateJiraConfig((current) => ({
       ...current,
-      [fieldKey]: value,
+      dynamicFieldValues: {
+        ...current.dynamicFieldValues,
+        [fieldKey]: value,
+      },
     }));
   };
 
@@ -2361,7 +2361,13 @@ export default function ReviewPage() {
   const loadJiraLookupResults = (field: JiraCreateFieldMeta, query: string) => {
     const kind = getLookupKind(field);
     if (!kind || !jiraCloudId || !jiraProjectKey || query.trim().length < 2) {
-      setJiraLookupResults((current) => ({ ...current, [field.key]: [] }));
+      updateJiraConfig((current) => ({
+        ...current,
+        lookupResults: {
+          ...current.lookupResults,
+          [field.key]: [],
+        },
+      }));
       return;
     }
 
@@ -2371,14 +2377,32 @@ export default function ReviewPage() {
 
     jiraLookupTimeoutsRef.current[field.key] = setTimeout(() => {
       void (async () => {
-        setJiraLookupLoading((current) => ({ ...current, [field.key]: true }));
+        updateJiraConfig((current) => ({
+          ...current,
+          lookupLoading: {
+            ...current.lookupLoading,
+            [field.key]: true,
+          },
+        }));
         try {
           const items = await getJiraLookup(jiraCloudId, jiraProjectKey, kind, query.trim());
-          setJiraLookupResults((current) => ({ ...current, [field.key]: items }));
+          updateJiraConfig((current) => ({
+            ...current,
+            lookupResults: {
+              ...current.lookupResults,
+              [field.key]: items,
+            },
+          }));
         } catch (lookupError) {
           setError(lookupError instanceof Error ? lookupError.message : "Failed to load Jira lookup results");
         } finally {
-          setJiraLookupLoading((current) => ({ ...current, [field.key]: false }));
+          updateJiraConfig((current) => ({
+            ...current,
+            lookupLoading: {
+              ...current.lookupLoading,
+              [field.key]: false,
+            },
+          }));
         }
       })();
     }, 250);
@@ -2592,7 +2616,13 @@ export default function ReviewPage() {
               value={queryValue}
               onChange={(event) => {
                 const nextValue = event.target.value;
-                setJiraLookupQueries((current) => ({ ...current, [field.key]: nextValue }));
+                updateJiraConfig((current) => ({
+                  ...current,
+                  lookupQueries: {
+                    ...current.lookupQueries,
+                    [field.key]: nextValue,
+                  },
+                }));
                 setDynamicFieldValue(field.key, nextValue);
                 loadJiraLookupResults(field, nextValue);
               }}
@@ -2611,8 +2641,17 @@ export default function ReviewPage() {
                       type="button"
                       onClick={() => {
                         setDynamicFieldValue(field.key, item.id);
-                        setJiraLookupQueries((current) => ({ ...current, [field.key]: item.label }));
-                        setJiraLookupResults((current) => ({ ...current, [field.key]: [] }));
+                        updateJiraConfig((current) => ({
+                          ...current,
+                          lookupQueries: {
+                            ...current.lookupQueries,
+                            [field.key]: item.label,
+                          },
+                          lookupResults: {
+                            ...current.lookupResults,
+                            [field.key]: [],
+                          },
+                        }));
                       }}
                       className="w-full rounded-lg border border-transparent px-3 py-2 text-left transition hover:border-[rgba(120,145,255,0.2)] hover:bg-[rgba(255,255,255,0.04)]"
                     >
@@ -2645,11 +2684,17 @@ export default function ReviewPage() {
 
   const handleExportToJira = async () => {
     if (!data || !jiraCloudId || !jiraProjectKey) return;
-    setJiraExporting(true);
-    setJiraExportStage("scanning");
+    setExecutionState((current) => ({
+      ...current,
+      jira: {
+        ...current.jira,
+        exporting: true,
+        stage: "scanning",
+        result: null,
+        scanResult: null,
+      },
+    }));
     setError(null);
-    setJiraResult(null);
-    setJiraScanResult(null);
     try {
       let advancedFields: Record<string, unknown> | undefined;
       if (jiraTicketDetails.advancedFieldsJson.trim()) {
@@ -2679,24 +2724,99 @@ export default function ReviewPage() {
       };
 
       const scan = await scanMeetingToJira(exportPayload);
-      setJiraScanResult(scan);
+      setExecutionState((current) => ({
+        ...current,
+        jira: {
+          ...current.jira,
+          scanResult: scan,
+        },
+      }));
       if (scan.blockedCount > 0) {
-        setJiraExportStage("blocked");
+        setExecutionState((current) => ({
+          ...current,
+          jira: {
+            ...current.jira,
+            exporting: false,
+            stage: "blocked",
+          },
+        }));
         setError(`Export blocked. ${scan.blockedCount} ticket${scan.blockedCount === 1 ? "" : "s"} need review before Jira creation.`);
         return;
       }
 
-      setJiraExportStage("exporting");
+      setExecutionState((current) => ({
+        ...current,
+        jira: {
+          ...current.jira,
+          stage: "exporting",
+        },
+      }));
       const result = await exportMeetingToJira(exportPayload);
-      setJiraResult(result);
+      setExecutionState((current) => ({
+        ...current,
+        jira: {
+          ...current.jira,
+          exporting: false,
+          stage: "complete",
+          result,
+        },
+      }));
       setData(await getMeeting(data.meeting.id));
-      setJiraExportStage("complete");
       void playJiraExportCompleteTone();
     } catch (jiraError) {
-      setJiraExportStage("idle");
+      setExecutionState((current) => ({
+        ...current,
+        jira: {
+          ...current.jira,
+          exporting: false,
+          stage: "idle",
+        },
+      }));
       setError(jiraError instanceof Error ? jiraError.message : "Failed to export to Jira");
-    } finally {
-      setJiraExporting(false);
+    }
+  };
+
+  const handleExportToEmail = async () => {
+    if (!data) return;
+    setExecutionState((current) => ({
+      ...current,
+      email: {
+        ...current.email,
+        exporting: true,
+        stage: "exporting",
+        result: null,
+      },
+    }));
+    setError(null);
+    try {
+      const result = await exportMeetingToEmail({
+        meetingId: data.meeting.id,
+        ticketFormatPreset,
+        recipientMode: emailRecipientMode,
+        recipients: emailRecipientMode === "custom" ? emailRecipients : undefined,
+        subject: emailSubject.trim() || undefined,
+      });
+      setExecutionState((current) => ({
+        ...current,
+        email: {
+          ...current.email,
+          exporting: false,
+          stage: "complete",
+          result,
+        },
+      }));
+      setData(await getMeeting(data.meeting.id));
+      void playJiraExportCompleteTone();
+    } catch (emailError) {
+      setExecutionState((current) => ({
+        ...current,
+        email: {
+          ...current.email,
+          exporting: false,
+          stage: "idle",
+        },
+      }));
+      setError(emailError instanceof Error ? emailError.message : "Failed to export to email");
     }
   };
 
@@ -2827,7 +2947,7 @@ export default function ReviewPage() {
   }> = [
     {
       id: "integrations",
-      title: "Integrations",
+      title: "Destinations",
       icon: (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className="h-5 w-5">
           <path d="M7 7h10v10H7z" />
@@ -2839,8 +2959,8 @@ export default function ReviewPage() {
       ),
       activeClass: "border-[rgba(120,145,255,0.5)] bg-[linear-gradient(145deg,rgba(30,123,255,0.34)_0%,rgba(143,56,255,0.3)_68%,rgba(255,180,0,0.14)_100%)] shadow-[0_18px_30px_-22px_rgba(30,123,255,0.95)]",
       idleClass: "border-[rgba(120,145,255,0.3)] bg-[linear-gradient(145deg,rgba(30,123,255,0.18)_0%,rgba(143,56,255,0.16)_68%,rgba(255,180,0,0.08)_100%)] hover:border-[rgba(120,145,255,0.48)]",
-      modalTitle: "Connected Platforms",
-      modalSubtitle: "Review what is connected and manage ticket export from one place.",
+      modalTitle: "Execution Destinations",
+      modalSubtitle: "Review delivery channels, connections, and export paths from one place.",
       modalWidth: "max-w-3xl",
     },
     {
@@ -3188,7 +3308,7 @@ export default function ReviewPage() {
             <div className="rounded-2xl border border-[rgba(120,145,255,0.24)] bg-[linear-gradient(135deg,rgba(30,123,255,0.12)_0%,rgba(143,56,255,0.08)_58%,rgba(255,180,0,0.06)_100%)] p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-muted)]">Review Control Center</p>
               <p className="mt-2 text-sm text-[var(--text-secondary)]">
-                Move between execution, integrations, and delivery activity without stacking every control in one column.
+                Move between execution, destinations, and delivery activity without stacking every control in one column.
               </p>
             </div>
             <Tabs
@@ -3208,37 +3328,22 @@ export default function ReviewPage() {
 
         <AnimatePresence>
           {jiraExportModalOpen && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(2,4,12,0.72)] p-4 backdrop-blur-md"
-              onClick={() => setJiraExportModalOpen(false)}
+            <ExecutionHubModal
+              open={jiraExportModalOpen}
+              activeDestination={executionHubTab}
+              destinationOptions={EXECUTION_DESTINATION_OPTIONS}
+              selectedDestinationTitle={executionHubTab === "jira" ? "Jira Delivery" : "Email Follow-Up"}
+              selectedDestinationDetail={
+                executionHubTab === "jira"
+                  ? "Create linked execution tickets and sync them back to OrbitPlan."
+                  : "Send a structured action-plan follow-up using OrbitPlan's execution profile."
+              }
+              selectedSections={selectedTicketFormat.sections}
+              onClose={() => setJiraExportModalOpen(false)}
+              onSelectDestination={(destination) => setExecutionState((current) => ({ ...current, activeDestination: destination }))}
             >
-              <motion.div
-                initial={{ opacity: 0, y: 24, scale: 0.96 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: 16, scale: 0.98 }}
-                transition={{ duration: 0.2, ease: "easeOut" }}
-                className="max-h-[85vh] w-full max-w-6xl overflow-auto rounded-[28px] border border-[rgba(120,145,255,0.3)] bg-[rgba(5,9,24,0.96)] p-5 shadow-[0_28px_80px_-36px_rgba(0,0,0,0.95)]"
-                onClick={(event) => event.stopPropagation()}
-              >
-                <div className="mb-4 flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-muted)]">Step 4</p>
-                    <h2 className="mt-1 text-2xl font-semibold text-[var(--text-primary)]">Jira Export</h2>
-                    <p className="mt-1 text-sm text-[var(--text-secondary)]">
-                      Configure, scan, and export the action plan to Jira from one focused workspace.
-                    </p>
-                  </div>
-                  <Button variant="ghost" onClick={() => setJiraExportModalOpen(false)}>
-                    Close
-                  </Button>
-                </div>
-
-                {renderJiraExportContent()}
-              </motion.div>
-            </motion.div>
+              {executionHubTab === "jira" ? renderJiraExportContent() : renderEmailExportContent()}
+            </ExecutionHubModal>
           )}
         </AnimatePresence>
 

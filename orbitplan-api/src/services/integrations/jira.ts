@@ -1,19 +1,15 @@
 import { URLSearchParams } from "node:url";
 import { env } from "../../config/env.js";
 import { clearJiraToken, getJiraToken, saveJiraToken } from "../../storage/jiraConnectionStore.js";
-import { getMeetingById, linkActionToJiraIssue, setActionJiraSyncState, updateActionFromJira } from "../../storage/meetingsStore.js";
+import { getMeetingById, setActionJiraSyncState, updateActionFromJira } from "../../storage/meetingsStore.js";
 import type {
   JiraCreateFieldMeta,
   JiraCreateFieldOption,
-  JiraExportResult,
   JiraIssueTypeCreateMeta,
   JiraLookupItem,
   JiraOAuthToken,
   JiraProject,
-  JiraScanResult,
   JiraSite,
-  JiraTicketDetails,
-  TicketFormatPreset,
 } from "../../types/jira.js";
 import type { ActionItem, ActionPriority, ActionStatus } from "../../types/action.js";
 
@@ -131,11 +127,6 @@ const jiraApi = async <T>(path: string, init?: RequestInit): Promise<T> => {
   return (await response.json()) as T;
 };
 
-const createParagraph = (text: string) => ({
-  type: "paragraph",
-  content: [{ type: "text", text }],
-});
-
 const toPriorityLabel = (priority: string) => (priority === "high" ? "High" : priority === "low" ? "Low" : "Medium");
 const fromJiraPriorityLabel = (priority?: string | null): ActionPriority => {
   const normalized = priority?.toLowerCase() ?? "";
@@ -198,143 +189,6 @@ const toJiraStatusCandidates = (status: ActionStatus) => {
     case "open":
     default:
       return ["To Do", "Open", "Selected for Development", "Backlog"];
-  }
-};
-const normalizeActionKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
-const looksTooVague = (value: string) =>
-  /\b(review|check|look into|discuss|follow up|handle|work on|investigate)\b/i.test(value) && value.split(/\s+/).length < 6;
-const hasFieldValue = (value: unknown): boolean => {
-  if (value == null) return false;
-  if (typeof value === "string") return value.trim().length > 0;
-  if (Array.isArray(value)) return value.length > 0;
-  if (typeof value === "object") return Object.keys(value as Record<string, unknown>).length > 0;
-  return true;
-};
-const isCoreSatisfiedField = (
-  fieldKey: string,
-  ticketDetails: JiraTicketDetails,
-  action: ActionItem,
-  selectedIssueTypeName: string,
-) => {
-  switch (fieldKey) {
-    case "project":
-    case "summary":
-    case "description":
-      return true;
-    case "issuetype":
-      return Boolean(selectedIssueTypeName.trim());
-    case "labels":
-      return hasFieldValue(ticketDetails.labels);
-    case "components":
-      return hasFieldValue(ticketDetails.components);
-    case "environment":
-      return hasFieldValue(ticketDetails.environment);
-    case "duedate":
-      return hasFieldValue(action.dueDate);
-    case "priority":
-      return true;
-    default:
-      return false;
-  }
-};
-
-const buildTicketSummary = (input: {
-  format: TicketFormatPreset;
-  meetingTitle: string;
-  actionDescription: string;
-  ownerEmail: string;
-  priority: string;
-}) => {
-  switch (input.format) {
-    case "engineering":
-      return `[ENG][${toPriorityLabel(input.priority)}] ${input.actionDescription}`;
-    case "operations":
-      return `[OPS] ${input.actionDescription} (${input.ownerEmail})`;
-    case "compliance":
-      return `[CTRL] ${input.actionDescription}`;
-    case "enterprise":
-    default:
-      return input.actionDescription;
-  }
-};
-
-const toAdfDescription = (input: {
-  format: TicketFormatPreset;
-  meetingTitle: string;
-  ownerEmail: string;
-  priority: string;
-  dueDate?: string;
-  transcript?: string;
-  actionDescription: string;
-  decisions?: string;
-  risks?: string;
-  notes?: string;
-  environment?: string;
-  additionalContext?: string;
-}) => {
-  const base = [
-    createParagraph(`Imported from OrbitPlan: ${input.meetingTitle}`),
-    createParagraph(`Owner: ${input.ownerEmail}`),
-    createParagraph(`Priority: ${toPriorityLabel(input.priority)}`),
-    ...(input.dueDate ? [createParagraph(`Due date: ${input.dueDate}`)] : []),
-    ...(input.environment ? [createParagraph(`Environment: ${input.environment}`)] : []),
-  ];
-
-  switch (input.format) {
-    case "engineering":
-      return {
-        type: "doc",
-        version: 1,
-        content: [
-          ...base,
-          createParagraph(`Implementation notes: ${input.actionDescription}`),
-          createParagraph(`Dependencies: ${input.notes || "Review meeting dependencies before implementation."}`),
-          createParagraph(`QA checklist: Validate expected behavior and confirm acceptance criteria.`),
-          createParagraph(`Release notes: ${input.decisions || "No release note summary captured."}`),
-          ...(input.additionalContext ? [createParagraph(`Additional context: ${input.additionalContext}`)] : []),
-          ...(input.transcript ? [createParagraph(`Transcript excerpt: ${input.transcript}`)] : []),
-        ],
-      };
-    case "operations":
-      return {
-        type: "doc",
-        version: 1,
-        content: [
-          ...base,
-          createParagraph(`Operational impact: ${input.actionDescription}`),
-          createParagraph(`Execution readiness: ${input.notes || "Review staffing, timing, and handoff requirements."}`),
-          createParagraph(`Stakeholders: ${input.ownerEmail}`),
-          createParagraph(`Runbook notes: ${input.transcript || "No transcript excerpt available."}`),
-          ...(input.additionalContext ? [createParagraph(`Additional context: ${input.additionalContext}`)] : []),
-        ],
-      };
-    case "compliance":
-      return {
-        type: "doc",
-        version: 1,
-        content: [
-          ...base,
-          createParagraph(`Control objective: ${input.actionDescription}`),
-          createParagraph(`Risk statement: ${input.risks || "Risk detail was not captured in the meeting summary."}`),
-          createParagraph(`Evidence: ${input.transcript || "Attach evidence or transcript excerpts before closure."}`),
-          createParagraph(`Approval trail: Derived from meeting "${input.meetingTitle}" and routed by OrbitPlan.`),
-          ...(input.additionalContext ? [createParagraph(`Additional context: ${input.additionalContext}`)] : []),
-        ],
-      };
-    case "enterprise":
-    default:
-      return {
-        type: "doc",
-        version: 1,
-        content: [
-          ...base,
-          createParagraph(`Business outcome: ${input.actionDescription}`),
-          createParagraph(`Scope: ${input.decisions || "Review the meeting summary for scope confirmation."}`),
-          createParagraph(`Acceptance criteria: ${input.notes || "Confirm completion with the meeting owner."}`),
-          ...(input.additionalContext ? [createParagraph(`Additional context: ${input.additionalContext}`)] : []),
-          ...(input.transcript ? [createParagraph(`Transcript excerpt: ${input.transcript}`)] : []),
-        ],
-      };
   }
 };
 
@@ -514,6 +368,16 @@ export const jiraIntegration = {
     }>(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${issueKey}?fields=summary,duedate,priority,status`);
   },
 
+  async createIssue(cloudId: string, fields: Record<string, unknown>) {
+    return jiraApi<{ key: string }>(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ fields }),
+    });
+  },
+
   async transitionIssueStatus(cloudId: string, issueKey: string, status: ActionStatus) {
     const transitions = await jiraApi<{ transitions?: Array<{ id: string; name: string }> }>(
       `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${issueKey}/transitions`,
@@ -593,184 +457,6 @@ export const jiraIntegration = {
         }
       }
     }
-  },
-
-  async exportMeetingActions(input: {
-    meetingId: string;
-    cloudId: string;
-    projectKey: string;
-    ticketFormatPreset?: TicketFormatPreset;
-    ticketDetails?: JiraTicketDetails;
-  }): Promise<JiraExportResult> {
-    const meeting = await getMeetingById(input.meetingId);
-    if (!meeting) {
-      throw new JiraIntegrationError("Meeting not found", 404);
-    }
-    if (!meeting.meeting.actionsConfirmed) {
-      throw new JiraIntegrationError("Confirm the action plan before exporting to Jira.", 409);
-    }
-
-    const issues: JiraExportResult["issues"] = [];
-    const ticketFormatPreset = input.ticketFormatPreset ?? "enterprise";
-    const ticketDetails = input.ticketDetails ?? {};
-    const sites = await this.listSites();
-    const siteUrl = sites.find((site) => site.id === input.cloudId)?.url ?? "";
-    const exportableActions = meeting.actions.filter((action) => !action.jiraIssueKey || !action.jiraCloudId);
-
-    if (exportableActions.length === 0) {
-      throw new JiraIntegrationError("All actions from this meeting are already linked to Jira.", 409);
-    }
-
-    for (const action of exportableActions) {
-      const createIssue = async (withPriority: boolean) =>
-        jiraApi<{ key: string }>(`https://api.atlassian.com/ex/jira/${input.cloudId}/rest/api/3/issue`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            fields: {
-              project: { key: input.projectKey },
-              summary: buildTicketSummary({
-                format: ticketFormatPreset,
-                meetingTitle: meeting.meeting.title,
-                actionDescription: action.description,
-                ownerEmail: action.ownerEmail,
-                priority: action.priority,
-              }),
-              issuetype: { name: ticketDetails.issueType?.trim() || "Task" },
-              description: toAdfDescription({
-                format: ticketFormatPreset,
-                meetingTitle: meeting.meeting.title,
-                ownerEmail: action.ownerEmail,
-                priority: action.priority,
-                dueDate: action.dueDate,
-                actionDescription: action.description,
-                decisions: meeting.summary?.decisions,
-                risks: meeting.summary?.risks,
-                notes: meeting.summary?.notes,
-                environment: ticketDetails.environment,
-                additionalContext: ticketDetails.additionalContext,
-                transcript: meeting.transcript?.text.slice(0, 200),
-              }),
-              ...(ticketDetails.labels && ticketDetails.labels.length > 0 ? { labels: ticketDetails.labels } : {}),
-              ...(ticketDetails.components && ticketDetails.components.length > 0
-                ? { components: ticketDetails.components.map((component) => ({ name: component })) }
-                : {}),
-              ...(action.dueDate ? { duedate: action.dueDate } : {}),
-              ...(withPriority
-                ? {
-                    priority: {
-                      name: action.priority === "high" ? "High" : action.priority === "low" ? "Low" : "Medium",
-                    },
-                  }
-                : {}),
-              ...(ticketDetails.advancedFields ?? {}),
-            },
-          }),
-        });
-
-      let created;
-      try {
-        created = await createIssue(true);
-      } catch (error) {
-        if (!(error instanceof JiraIntegrationError) || error.status < 400 || error.status >= 500) {
-          throw error;
-        }
-        created = await createIssue(false);
-      }
-
-      issues.push({
-        actionId: action.id,
-        key: created.key,
-        url: `${siteUrl}/browse/${created.key}`,
-      });
-      await linkActionToJiraIssue(action.id, {
-        jiraIssueKey: created.key,
-        jiraIssueUrl: `${siteUrl}/browse/${created.key}`,
-        jiraCloudId: input.cloudId,
-        jiraProjectKey: input.projectKey,
-      });
-    }
-
-    return {
-      createdCount: issues.length,
-      issues,
-    };
-  },
-
-  async scanMeetingActions(input: {
-    meetingId: string;
-    cloudId: string;
-    projectKey: string;
-    ticketFormatPreset?: TicketFormatPreset;
-    ticketDetails?: JiraTicketDetails;
-  }): Promise<JiraScanResult> {
-    const meeting = await getMeetingById(input.meetingId);
-    if (!meeting) {
-      throw new JiraIntegrationError("Meeting not found", 404);
-    }
-    if (!meeting.meeting.actionsConfirmed) {
-      throw new JiraIntegrationError("Confirm the action plan before scanning for Jira export.", 409);
-    }
-
-    const ticketDetails = input.ticketDetails ?? {};
-    const selectedIssueTypeName = ticketDetails.issueType?.trim() || "Task";
-    const issueTypes = await this.getCreateMeta(input.cloudId, input.projectKey);
-    const selectedIssueType =
-      issueTypes.find((issueType) => issueType.name === selectedIssueTypeName || issueType.id === selectedIssueTypeName) ?? null;
-    const requiredFields = (selectedIssueType?.fields ?? []).filter((field) => field.required);
-
-    const duplicateCounts = new Map<string, number>();
-    for (const action of meeting.actions) {
-      const key = normalizeActionKey(action.description);
-      duplicateCounts.set(key, (duplicateCounts.get(key) ?? 0) + 1);
-    }
-
-    const items = meeting.actions.map((action) => {
-      const reasons: string[] = [];
-      const normalizedKey = normalizeActionKey(action.description);
-
-      if (action.description.trim().length < 12) {
-        reasons.push("Action title is too short for a production Jira ticket.");
-      }
-      if (looksTooVague(action.description)) {
-        reasons.push("Action is too vague. Make the outcome more specific before export.");
-      }
-      if ((duplicateCounts.get(normalizedKey) ?? 0) > 1) {
-        reasons.push("Possible duplicate action detected in this meeting.");
-      }
-      if (!action.ownerEmail || action.ownerEmail === "unassigned@orbitplan.local") {
-        reasons.push("No real owner is assigned.");
-      }
-      if (action.confidence < 0.55) {
-        reasons.push("Low extraction confidence. Review before export.");
-      }
-      if (!selectedIssueType) {
-        reasons.push(`Issue type "${selectedIssueTypeName}" is not available for project ${input.projectKey}.`);
-      } else {
-        for (const field of requiredFields) {
-          const isSatisfiedByCore = isCoreSatisfiedField(field.key, ticketDetails, action, selectedIssueType.name);
-          const isSatisfiedByAdvanced = hasFieldValue(ticketDetails.advancedFields?.[field.key]);
-          if (!isSatisfiedByCore && !isSatisfiedByAdvanced) {
-            reasons.push(`Missing required Jira field: ${field.name}.`);
-          }
-        }
-      }
-
-      return {
-        actionId: action.id,
-        description: action.description,
-        status: reasons.length === 0 ? ("ready" as const) : ("blocked" as const),
-        reasons,
-      };
-    });
-
-    return {
-      readyCount: items.filter((item) => item.status === "ready").length,
-      blockedCount: items.filter((item) => item.status === "blocked").length,
-      items,
-    };
   },
 };
 

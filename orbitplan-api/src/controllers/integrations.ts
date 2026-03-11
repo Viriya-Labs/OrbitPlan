@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import { z } from "zod";
+import { ExecutionError, executionService } from "../services/execution/index.js";
 import { JiraIntegrationError, jiraIntegration } from "../services/integrations/jira.js";
 
 const JiraExportSchema = z.object({
@@ -19,10 +20,20 @@ const JiraExportSchema = z.object({
     .optional(),
 });
 const JiraScanSchema = JiraExportSchema;
+const EmailExportSchema = z.object({
+  meetingId: z.string().uuid(),
+  ticketFormatPreset: z.enum(["enterprise", "engineering", "operations", "compliance"]).optional(),
+  recipientMode: z.enum(["attendees", "owners", "custom"]),
+  recipients: z.array(z.string().email()).optional(),
+  subject: z.string().min(1).optional(),
+});
 
 const handleJiraError = (res: Response, error: unknown) => {
   if (error instanceof JiraIntegrationError) {
     return res.status(error.status).json({ error: error.message });
+  }
+  if (error instanceof ExecutionError) {
+    return res.status(error.status).json({ error: error.message, code: error.code });
   }
   return res.status(500).json({ error: error instanceof Error ? error.message : "Unknown Jira integration error" });
 };
@@ -148,7 +159,17 @@ export const exportMeetingToJiraHandler = async (req: Request, res: Response) =>
   }
 
   try {
-    return res.status(200).json(await jiraIntegration.exportMeetingActions(parsed.data));
+    const result = await executionService.export({
+      meetingId: parsed.data.meetingId,
+      profile: parsed.data.ticketFormatPreset ?? "enterprise",
+      target: {
+        destination: "jira",
+        cloudId: parsed.data.cloudId,
+        projectKey: parsed.data.projectKey,
+        ticketDetails: parsed.data.ticketDetails,
+      },
+    });
+    return res.status(200).json(result.result);
   } catch (error) {
     return handleJiraError(res, error);
   }
@@ -161,7 +182,40 @@ export const scanMeetingToJiraHandler = async (req: Request, res: Response) => {
   }
 
   try {
-    return res.status(200).json(await jiraIntegration.scanMeetingActions(parsed.data));
+    const result = await executionService.scan({
+      meetingId: parsed.data.meetingId,
+      profile: parsed.data.ticketFormatPreset ?? "enterprise",
+      target: {
+        destination: "jira",
+        cloudId: parsed.data.cloudId,
+        projectKey: parsed.data.projectKey,
+        ticketDetails: parsed.data.ticketDetails,
+      },
+    });
+    return res.status(200).json(result.raw ?? result);
+  } catch (error) {
+    return handleJiraError(res, error);
+  }
+};
+
+export const exportMeetingToEmailHandler = async (req: Request, res: Response) => {
+  const parsed = EmailExportSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+  }
+
+  try {
+    const result = await executionService.export({
+      meetingId: parsed.data.meetingId,
+      profile: parsed.data.ticketFormatPreset ?? "enterprise",
+      target: {
+        destination: "email",
+        recipientMode: parsed.data.recipientMode,
+        recipients: parsed.data.recipients,
+        subject: parsed.data.subject,
+      },
+    });
+    return res.status(200).json(result.result);
   } catch (error) {
     return handleJiraError(res, error);
   }

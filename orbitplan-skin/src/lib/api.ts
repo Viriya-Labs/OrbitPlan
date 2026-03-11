@@ -2,6 +2,7 @@ import { config } from "@/lib/config";
 import type { MeetingCreateDTO } from "@/dto/meetings";
 import type { ActionPriority, ActionStatus } from "@/types/action";
 import type { AuthUser } from "@/types/auth";
+import type { EmailExportResult } from "@/types/execution";
 import type { JiraExportResult, JiraIntegrationStatus, JiraIssueTypeCreateMeta, JiraLookupItem, JiraProject, JiraScanResult, JiraSite } from "@/types/jira";
 import type { Meeting } from "@/types/meeting";
 import type { MeetingChatHistoryResponse, MeetingChatResponse } from "@/types/chat";
@@ -309,6 +310,22 @@ export const scanMeetingToJira = async (payload: {
   });
   if (!response.ok) return toError(response);
   return (await response.json()) as JiraScanResult;
+};
+
+export const exportMeetingToEmail = async (payload: {
+  meetingId: string;
+  ticketFormatPreset?: "enterprise" | "engineering" | "operations" | "compliance";
+  recipientMode: "attendees" | "owners" | "custom";
+  recipients?: string[];
+  subject?: string;
+}): Promise<EmailExportResult> => {
+  const response = await apiFetch(`${config.apiBaseUrl}/api/integrations/email/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) return toError(response);
+  return (await response.json()) as EmailExportResult;
 };
 
 export const login = async (payload: { email: string; password: string }): Promise<AuthUser> => {

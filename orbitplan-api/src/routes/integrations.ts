@@ -2,6 +2,7 @@ import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
 import {
   disconnectJiraHandler,
+  exportMeetingToEmailHandler,
   exportMeetingToJiraHandler,
   getJiraAuthUrlHandler,
   getJiraCreateMetaHandler,
@@ -26,5 +27,6 @@ router.get("/integrations/jira/create-meta", getJiraCreateMetaHandler);
 router.get("/integrations/jira/lookup", getJiraLookupHandler);
 router.post("/integrations/jira/scan", scanMeetingToJiraHandler);
 router.post("/integrations/jira/export", exportMeetingToJiraHandler);
+router.post("/integrations/email/export", exportMeetingToEmailHandler);
 
 export default router;
