@@ -74,8 +74,11 @@ export function AppShell({
   const showSidebar = pathname !== "/";
 
   const handleLogout = async () => {
-    await logout();
-    router.push("/");
+    try {
+      await logout();
+    } finally {
+      router.push("/");
+    }
   };
 
   const toggleSidebar = () => {
@@ -208,15 +211,46 @@ export function AppShell({
                 ) : !isSidebarExpanded && sidebarCollapsedContent ? (
                   sidebarCollapsedContent
                 ) : isSidebarExpanded ? (
-                  <div className="space-y-2">
-                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-muted)]">Sidebar Space</p>
-                    <p className="text-sm text-[var(--text-secondary)]">Top navigation was moved back to the header. You can add new sidebar tools here.</p>
+                  <div className="space-y-3">
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-muted)]">Workspace Tools</p>
+                      <p className="text-sm text-[var(--text-secondary)]">Quick access to account connections and sync controls.</p>
+                    </div>
+                    <Link
+                      href="/integrations"
+                      className="flex items-center gap-3 rounded-[20px] border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.04)] px-4 py-3 text-sm font-semibold text-[var(--text-primary)] transition hover:border-[rgba(108,242,255,0.35)] hover:bg-[rgba(108,242,255,0.08)]"
+                    >
+                      <span className="flex h-10 w-10 items-center justify-center rounded-2xl border border-[rgba(120,145,255,0.18)] bg-[rgba(7,12,30,0.72)] text-[var(--accent)]">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-5 w-5">
+                          <path d="M7 7h10v10H7z" />
+                          <path d="M4 12h3" />
+                          <path d="M17 12h3" />
+                          <path d="M12 4v3" />
+                          <path d="M12 17v3" />
+                        </svg>
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block">Integrations</span>
+                        <span className="block text-xs font-medium text-[var(--text-secondary)]">Zoom, Teams, Jira, and more</span>
+                      </span>
+                    </Link>
                   </div>
                 ) : (
                   <div className="flex h-full items-center justify-center">
-                    <span className="rounded-full border border-[rgba(120,145,255,0.14)] bg-[rgba(255,255,255,0.04)] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--text-muted)]">
-                      Hover
-                    </span>
+                    <Link
+                      href="/integrations"
+                      aria-label="Open integrations"
+                      title="Integrations"
+                      className="flex h-14 w-14 items-center justify-center rounded-[20px] border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.04)] text-[var(--accent)] transition hover:border-[rgba(108,242,255,0.35)] hover:bg-[rgba(108,242,255,0.08)]"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-5 w-5">
+                        <path d="M7 7h10v10H7z" />
+                        <path d="M4 12h3" />
+                        <path d="M17 12h3" />
+                        <path d="M12 4v3" />
+                        <path d="M12 17v3" />
+                      </svg>
+                    </Link>
                   </div>
                 )}
               </div>

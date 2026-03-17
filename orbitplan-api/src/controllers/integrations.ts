@@ -2,6 +2,8 @@ import type { Request, Response } from "express";
 import { z } from "zod";
 import { ExecutionError, executionService } from "../services/execution/index.js";
 import { JiraIntegrationError, jiraIntegration } from "../services/integrations/jira.js";
+import { MeetingProviderIntegrationError, meetingProviders } from "../services/integrations/meetingProviders.js";
+import type { MeetingProvider } from "../types/meeting.js";
 
 const JiraExportSchema = z.object({
   meetingId: z.string().uuid(),
@@ -27,6 +29,21 @@ const EmailExportSchema = z.object({
   recipients: z.array(z.string().email()).optional(),
   subject: z.string().min(1).optional(),
 });
+const MeetingImportSchema = z.object({
+  title: z.string().min(1),
+  scheduledAt: z.string().datetime().optional(),
+  attendees: z.array(z.string().email()).optional(),
+  organizerEmail: z.string().email().optional(),
+  externalMeetingId: z.string().min(1),
+  externalRecordId: z.string().min(1).optional(),
+  externalUrl: z.string().url().optional(),
+  transcriptText: z.string().min(1).optional(),
+  recordingUrl: z.string().url().optional(),
+  mimeType: z.string().min(1).optional(),
+  fileName: z.string().min(1).optional(),
+}).refine((data) => data.transcriptText || data.recordingUrl, {
+  message: "transcriptText or recordingUrl is required",
+});
 
 const handleJiraError = (res: Response, error: unknown) => {
   if (error instanceof JiraIntegrationError) {
@@ -37,6 +54,17 @@ const handleJiraError = (res: Response, error: unknown) => {
   }
   return res.status(500).json({ error: error instanceof Error ? error.message : "Unknown Jira integration error" });
 };
+
+const handleMeetingProviderError = (res: Response, error: unknown) => {
+  if (error instanceof MeetingProviderIntegrationError) {
+    return res.status(error.status).json({ error: error.message });
+  }
+  return res
+    .status(500)
+    .json({ error: error instanceof Error ? error.message : "Unknown meeting provider integration error" });
+};
+
+const getProvider = (provider: string) => meetingProviders.get(provider as MeetingProvider);
 
 export const getJiraStatusHandler = async (_req: Request, res: Response) => {
   try {
@@ -218,5 +246,99 @@ export const exportMeetingToEmailHandler = async (req: Request, res: Response) =
     return res.status(200).json(result.result);
   } catch (error) {
     return handleJiraError(res, error);
+  }
+};
+
+export const getMeetingProviderStatusHandler = async (req: Request, res: Response) => {
+  try {
+    const provider = getProvider(req.params.provider);
+    return res.status(200).json(await provider.getStatus(req.authSession!.user.id));
+  } catch (error) {
+    return handleMeetingProviderError(res, error);
+  }
+};
+
+export const getMeetingProviderAuthUrlHandler = async (req: Request, res: Response) => {
+  try {
+    const provider = getProvider(req.params.provider);
+    return res.status(200).json({ url: provider.getAuthorizationUrl(req.authSession!.user.id) });
+  } catch (error) {
+    return handleMeetingProviderError(res, error);
+  }
+};
+
+export const disconnectMeetingProviderHandler = async (req: Request, res: Response) => {
+  try {
+    const provider = getProvider(req.params.provider);
+    return res.status(200).json(await provider.disconnect(req.authSession!.user.id));
+  } catch (error) {
+    return handleMeetingProviderError(res, error);
+  }
+};
+
+export const meetingProviderCallbackHandler = async (req: Request, res: Response) => {
+  const code = typeof req.query.code === "string" ? req.query.code : undefined;
+  const state = typeof req.query.state === "string" ? req.query.state : undefined;
+  if (!code) {
+    return res.status(400).send("Missing OAuth code.");
+  }
+
+  try {
+    const provider = getProvider(req.params.provider);
+    await provider.handleCallback(code, state);
+    return res
+      .status(200)
+      .type("html")
+      .send(`<!doctype html>
+<html>
+  <body style="font-family:sans-serif;background:#0b1024;color:#fff;padding:24px">
+    Meeting provider connected. You can return to OrbitPlan.
+    <script>
+      if (window.opener) {
+        window.opener.postMessage({ type: "orbitplan:meeting-provider-connected", provider: "${req.params.provider}" }, "*");
+      }
+      setTimeout(function () { window.close(); }, 1200);
+    </script>
+  </body>
+</html>`);
+  } catch (error) {
+    return handleMeetingProviderError(res, error);
+  }
+};
+
+export const importMeetingFromProviderHandler = async (req: Request, res: Response) => {
+  const parsed = MeetingImportSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+  }
+
+  try {
+    const provider = getProvider(req.params.provider);
+    const result = await provider.importMeeting(req.authSession!.user.id, {
+      provider: req.params.provider as MeetingProvider,
+      ...parsed.data,
+    });
+    return res.status(200).json(result);
+  } catch (error) {
+    return handleMeetingProviderError(res, error);
+  }
+};
+
+export const meetingProviderWebhookHandler = async (req: Request, res: Response) => {
+  if (req.params.provider === "teams") {
+    const validationToken =
+      (typeof req.query.validationToken === "string" ? req.query.validationToken : undefined) ??
+      (Array.isArray(req.headers.validationtoken) ? req.headers.validationtoken[0] : req.headers.validationtoken);
+    if (validationToken) {
+      return res.status(200).type("text/plain").send(validationToken);
+    }
+  }
+
+  try {
+    const provider = getProvider(req.params.provider);
+    const result = await provider.handleWebhook(req.body, req.headers);
+    return res.status(202).json(result);
+  } catch (error) {
+    return handleMeetingProviderError(res, error);
   }
 };

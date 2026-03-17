@@ -67,11 +67,20 @@ const toError = async (response: Response): Promise<never> => {
   throw new ApiRequestError(message, { status: response.status, code, details });
 };
 
-const apiFetch = (input: string, init?: RequestInit) =>
-  fetch(input, {
-    ...init,
-    credentials: "include",
-  });
+const apiFetch = async (input: string, init?: RequestInit) => {
+  try {
+    return await fetch(input, {
+      ...init,
+      credentials: "include",
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? `Unable to reach the OrbitPlan API at ${config.apiBaseUrl}. Check that the API is running and NEXT_PUBLIC_API_BASE_URL is correct.`
+        : "Unable to reach the OrbitPlan API.";
+    throw new ApiRequestError(message, { status: 0, details: error instanceof Error ? error.message : undefined });
+  }
+};
 
 export const createMeeting = async (payload: MeetingCreateDTO): Promise<Meeting> => {
   const response = await apiFetch(`${config.apiBaseUrl}/api/meetings`, {

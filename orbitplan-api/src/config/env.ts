@@ -18,4 +18,13 @@ export const env = {
   jiraClientId: process.env.JIRA_CLIENT_ID,
   jiraClientSecret: process.env.JIRA_CLIENT_SECRET,
   jiraRedirectUri: process.env.JIRA_REDIRECT_URI,
+  zoomClientId: process.env.ZOOM_CLIENT_ID,
+  zoomClientSecret: process.env.ZOOM_CLIENT_SECRET,
+  zoomRedirectUri: process.env.ZOOM_REDIRECT_URI,
+  zoomWebhookSecret: process.env.ZOOM_WEBHOOK_SECRET,
+  microsoftTenantId: process.env.MICROSOFT_TENANT_ID ?? "common",
+  microsoftClientId: process.env.MICROSOFT_CLIENT_ID,
+  microsoftClientSecret: process.env.MICROSOFT_CLIENT_SECRET,
+  microsoftRedirectUri: process.env.MICROSOFT_REDIRECT_URI,
+  teamsWebhookSecret: process.env.TEAMS_WEBHOOK_SECRET,
 };

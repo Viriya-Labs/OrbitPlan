@@ -16,6 +16,11 @@ export const MeetingResponseSchema = z.object({
   scheduledAt: z.string().datetime().optional(),
   attendees: z.array(z.string().email()),
   source: z.enum(["upload", "record"]),
+  provider: z.enum(["zoom", "teams"]).optional(),
+  externalMeetingId: z.string().optional(),
+  externalRecordId: z.string().optional(),
+  externalUrl: z.string().url().optional(),
+  organizerEmail: z.string().email().optional(),
   actionsConfirmed: z.boolean(),
   createdAt: z.string().datetime(),
 });

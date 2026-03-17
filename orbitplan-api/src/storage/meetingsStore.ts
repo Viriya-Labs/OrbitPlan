@@ -36,6 +36,11 @@ const mapMeeting = (meeting: {
   scheduledAt: Date | null;
   attendees: string[];
   source: "upload" | "record";
+  provider?: "zoom" | "teams" | null;
+  externalMeetingId?: string | null;
+  externalRecordId?: string | null;
+  externalUrl?: string | null;
+  organizerEmail?: string | null;
   status: "created" | "processing" | "ready" | "approved" | "error";
   actionsConfirmed: boolean;
   createdAt: Date;
@@ -45,6 +50,11 @@ const mapMeeting = (meeting: {
   scheduledAt: meeting.scheduledAt?.toISOString(),
   attendees: meeting.attendees,
   source: meeting.source,
+  provider: meeting.provider ?? undefined,
+  externalMeetingId: meeting.externalMeetingId ?? undefined,
+  externalRecordId: meeting.externalRecordId ?? undefined,
+  externalUrl: meeting.externalUrl ?? undefined,
+  organizerEmail: meeting.organizerEmail ?? undefined,
   status: meeting.status,
   actionsConfirmed: meeting.actionsConfirmed,
   createdAt: meeting.createdAt.toISOString(),
@@ -182,6 +192,46 @@ export const createMeeting = async (input: MeetingCreateDTO): Promise<Meeting> =
   });
 
   return mapMeeting(meeting);
+};
+
+export const createImportedMeeting = async (input: {
+  title: string;
+  scheduledAt?: string;
+  attendees?: string[];
+  provider: "zoom" | "teams";
+  externalMeetingId: string;
+  externalRecordId?: string;
+  externalUrl?: string;
+  organizerEmail?: string;
+}) => {
+  const existing = await prisma.meeting.findFirst({
+    where: {
+      provider: input.provider,
+      externalMeetingId: input.externalMeetingId,
+    },
+    include: meetingInclude,
+  });
+  if (existing) return mapMeetingDetail(existing);
+
+  const created = await prisma.meeting.create({
+    data: {
+      id: crypto.randomUUID(),
+      title: input.title,
+      scheduledAt: input.scheduledAt ? new Date(input.scheduledAt) : null,
+      attendees: input.attendees ?? [],
+      source: "record",
+      provider: input.provider,
+      externalMeetingId: input.externalMeetingId,
+      externalRecordId: input.externalRecordId ?? null,
+      externalUrl: input.externalUrl ?? null,
+      organizerEmail: input.organizerEmail ?? null,
+      status: "created",
+      actionsConfirmed: true,
+    },
+    include: meetingInclude,
+  });
+
+  return mapMeetingDetail(created);
 };
 
 export const getMeetingById = async (id: string) => {

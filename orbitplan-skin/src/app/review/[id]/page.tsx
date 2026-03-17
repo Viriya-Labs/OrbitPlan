@@ -456,7 +456,7 @@ export default function ReviewPage() {
   const suppressNextChatSoundRef = useRef(false);
   const jiraLookupTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout> | undefined>>({});
   const jiraConnectWindowRef = useRef<Window | null>(null);
-  const jiraConnectPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const jiraConnectPollRef = useRef<number | null>(null);
   const selectedTicketFormat =
     TICKET_FORMAT_PRESETS.find((preset) => preset.id === ticketFormatPreset) ?? TICKET_FORMAT_PRESETS[0];
   const executionHubTab = executionState.activeDestination;
@@ -1067,10 +1067,10 @@ export default function ReviewPage() {
           id: action.id,
           description: action.description,
           ownerEmail: action.ownerEmail,
-          dueDate: action.dueDate,
+          dueDate: action.dueDate ?? null,
           status: action.status,
           priority: action.priority,
-          jiraIssueUrl: action.jiraIssueUrl,
+          jiraIssueUrl: action.jiraIssueUrl ?? null,
           jiraSyncLabel: jiraSyncLabel[action.jiraSyncStatus],
         }))}
         statusBadgeClass={statusBadgeClass}
@@ -2003,7 +2003,7 @@ export default function ReviewPage() {
     try {
       const response = await askMeetingQuestion(data.meeting.id, q);
       if (response.messages && response.messages.length > 0) {
-        setChatMessages((prev) => [...prev, ...response.messages]);
+        setChatMessages((prev) => [...prev, ...(response.messages ?? [])]);
       } else {
         const fallbackMessages: ChatMessage[] = [
           {
@@ -2764,7 +2764,7 @@ export default function ReviewPage() {
       doc.save(`${fallbackTitle}-transcript.pdf`);
       return;
     } else if (downloadFormat === "docx") {
-      const document = new Document({
+      const doc = new Document({
         sections: [
           {
             children: [
@@ -2783,7 +2783,7 @@ export default function ReviewPage() {
         ],
       });
 
-      const blob = await Packer.toBlob(document);
+      const blob = await Packer.toBlob(doc);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;

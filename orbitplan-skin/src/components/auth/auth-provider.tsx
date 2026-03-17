@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { getCurrentUser, login as apiLogin, logout as apiLogout } from "@/lib/api";
+import { ApiRequestError, getCurrentUser, login as apiLogin, logout as apiLogout } from "@/lib/api";
 import type { AuthUser } from "@/types/auth";
 
 type AuthContextValue = {
@@ -22,6 +22,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setIsLoading(true);
     try {
       setUser(await getCurrentUser());
+    } catch (error) {
+      setUser(null);
+      if (!(error instanceof ApiRequestError) || error.status !== 0) {
+        throw error;
+      }
     } finally {
       setIsLoading(false);
     }
@@ -42,6 +47,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       async logout() {
         try {
           await apiLogout();
+        } catch {
+          // Clear local auth state even if the API is unavailable during logout.
         } finally {
           setUser(null);
           setIsLoading(false);
