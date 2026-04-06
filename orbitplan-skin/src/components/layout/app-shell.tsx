@@ -10,6 +10,7 @@ import { useAuth } from "@/components/auth/auth-provider";
 const navItems = [
   { href: "/", label: "Overview" },
   { href: "/upload", label: "Upload" },
+  { href: "/zoom-inbox", label: "Zoom Inbox" },
 ];
 
 const getUserInitials = (email: string) =>
@@ -217,6 +218,22 @@ export function AppShell({
                       <p className="text-sm text-[var(--text-secondary)]">Quick access to account connections and sync controls.</p>
                     </div>
                     <Link
+                      href="/zoom-inbox"
+                      className="flex items-center gap-3 rounded-[20px] border border-[rgba(56,255,179,0.16)] bg-[rgba(56,255,179,0.05)] px-4 py-3 text-sm font-semibold text-[var(--text-primary)] transition hover:border-[rgba(56,255,179,0.3)] hover:bg-[rgba(56,255,179,0.1)]"
+                    >
+                      <span className="flex h-10 w-10 items-center justify-center rounded-2xl border border-[rgba(56,255,179,0.16)] bg-[rgba(7,12,30,0.72)] text-[var(--success)]">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-5 w-5">
+                          <path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z" />
+                          <path d="m9 10 3 2 3-2" />
+                          <path d="M7.5 9.5h9" />
+                        </svg>
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block">Zoom Inbox</span>
+                        <span className="block text-xs font-medium text-[var(--text-secondary)]">Imported recordings and review links</span>
+                      </span>
+                    </Link>
+                    <Link
                       href="/integrations"
                       className="flex items-center gap-3 rounded-[20px] border border-[rgba(120,145,255,0.18)] bg-[rgba(255,255,255,0.04)] px-4 py-3 text-sm font-semibold text-[var(--text-primary)] transition hover:border-[rgba(108,242,255,0.35)] hover:bg-[rgba(108,242,255,0.08)]"
                     >
@@ -237,6 +254,18 @@ export function AppShell({
                   </div>
                 ) : (
                   <div className="flex h-full items-center justify-center">
+                    <Link
+                      href="/zoom-inbox"
+                      aria-label="Open Zoom inbox"
+                      title="Zoom inbox"
+                      className="flex h-14 w-14 items-center justify-center rounded-[20px] border border-[rgba(56,255,179,0.16)] bg-[rgba(56,255,179,0.05)] text-[var(--success)] transition hover:border-[rgba(56,255,179,0.3)] hover:bg-[rgba(56,255,179,0.1)]"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-5 w-5">
+                        <path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z" />
+                        <path d="m9 10 3 2 3-2" />
+                        <path d="M7.5 9.5h9" />
+                      </svg>
+                    </Link>
                     <Link
                       href="/integrations"
                       aria-label="Open integrations"

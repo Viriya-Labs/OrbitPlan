@@ -31,8 +31,8 @@ export const createApp = () => {
   });
 
   app.use("/api", authRouter);
-  app.use("/api", requireAuth, meetingsRouter);
   app.use("/api", integrationsRouter);
+  app.use("/api", requireAuth, meetingsRouter);
 
   return app;
 };

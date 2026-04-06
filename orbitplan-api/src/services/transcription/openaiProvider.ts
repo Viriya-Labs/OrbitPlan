@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import OpenAI from "openai";
 import { env } from "../../config/env.js";
+import { withOpenAiRetry } from "../openai/retry.js";
+import { prepareMediaForTranscription } from "./mediaPreprocessor.js";
 import type { TranscriptionInput, TranscriptionProvider, TranscriptionResult } from "./types.js";
 
 export class OpenAiTranscriptionProvider implements TranscriptionProvider {
@@ -11,13 +13,21 @@ export class OpenAiTranscriptionProvider implements TranscriptionProvider {
   }
 
   async transcribe(input: TranscriptionInput): Promise<TranscriptionResult> {
-    const transcription = await this.client.audio.transcriptions.create({
-      file: fs.createReadStream(input.filePath),
-      model: "gpt-4o-mini-transcribe",
-    }, {
-      timeout: env.aiTimeoutMs,
-    });
+    const prepared = await prepareMediaForTranscription(input);
 
-    return { text: transcription.text };
+    try {
+      const transcription = await withOpenAiRetry(() =>
+        this.client.audio.transcriptions.create({
+          file: fs.createReadStream(prepared.filePath),
+          model: "gpt-4o-mini-transcribe",
+        }, {
+          timeout: env.aiTimeoutMs,
+        }),
+      );
+
+      return { text: transcription.text };
+    } finally {
+      await prepared.cleanup?.();
+    }
   }
 }

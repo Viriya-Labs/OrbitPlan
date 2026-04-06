@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { z } from "zod";
 import { env } from "../../config/env.js";
 import { MEETING_ANALYSIS_SYSTEM_PROMPT } from "../../prompts/meetingAnalysis.js";
+import { withOpenAiRetry } from "../openai/retry.js";
 import { extractActionsFromTranscript, finalizeActions, generateStarterActionsFromIntent } from "./actionExtraction.js";
 import type { AnalysisInput, AnalysisProvider, AnalysisResult } from "./types.js";
 
@@ -97,27 +98,29 @@ export class OpenAiAnalysisProvider implements AnalysisProvider {
   }
 
   async analyze(input: AnalysisInput): Promise<AnalysisResult> {
-    const completion = await this.client.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: MEETING_ANALYSIS_SYSTEM_PROMPT,
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            meetingTitle: input.meetingTitle,
-            attendees: input.attendees,
-            transcript: input.transcript,
-          }),
-        },
-      ],
-    }, {
-      timeout: env.aiTimeoutMs,
-    });
+    const completion = await withOpenAiRetry(() =>
+      this.client.chat.completions.create({
+        model: "gpt-4o-mini",
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: MEETING_ANALYSIS_SYSTEM_PROMPT,
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              meetingTitle: input.meetingTitle,
+              attendees: input.attendees,
+              transcript: input.transcript,
+            }),
+          },
+        ],
+      }, {
+        timeout: env.aiTimeoutMs,
+      }),
+    );
 
     const raw = completion.choices[0]?.message?.content;
     if (!raw) {

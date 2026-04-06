@@ -10,6 +10,7 @@ import type { MeetingTranscript } from "../types/transcript.js";
 import type { MeetingChatMessage } from "../types/chatMessage.js";
 import type { MeetingCreateDTO } from "../dto/meetings.js";
 import type { AnalysisResult } from "../services/analysis/types.js";
+import type { MeetingProviderInboxItem } from "../types/meetingProvider.js";
 
 const meetingInclude = Prisma.validator<Prisma.MeetingInclude>()({
   files: true,
@@ -46,6 +47,7 @@ const mapMeeting = (meeting: {
   createdAt: Date;
   processingError: string | null;
   processingStartedAt: Date | null;
+  processingStage?: string | null;
 }): Meeting => ({
   id: meeting.id,
   title: meeting.title,
@@ -62,6 +64,7 @@ const mapMeeting = (meeting: {
   createdAt: meeting.createdAt.toISOString(),
   ...(meeting.processingError ? { processingError: meeting.processingError } : {}),
   ...(meeting.processingStartedAt ? { processingStartedAt: meeting.processingStartedAt.toISOString() } : {}),
+  ...(meeting.processingStage ? { processingStage: meeting.processingStage as Meeting["processingStage"] } : {}),
 });
 
 const mapFile = (file: {
@@ -246,6 +249,45 @@ export const getMeetingById = async (id: string) => {
   return record ? mapMeetingDetail(record) : null;
 };
 
+export const listImportedMeetingsByProvider = async (
+  provider: "zoom" | "teams",
+): Promise<MeetingProviderInboxItem[]> => {
+  const meetings = await prisma.meeting.findMany({
+    where: {
+      provider,
+      source: "record",
+    },
+    include: {
+      files: {
+        select: {
+          id: true,
+        },
+      },
+      transcript: {
+        select: {
+          id: true,
+        },
+      },
+    },
+    orderBy: [{ scheduledAt: "desc" }, { createdAt: "desc" }],
+  });
+
+  return meetings.map((meeting) => ({
+    id: meeting.id,
+    provider,
+    title: meeting.title,
+    status: meeting.status,
+    createdAt: meeting.createdAt.toISOString(),
+    scheduledAt: meeting.scheduledAt?.toISOString(),
+    organizerEmail: meeting.organizerEmail ?? undefined,
+    externalUrl: meeting.externalUrl ?? undefined,
+    attendeeCount: meeting.attendees.length,
+    hasRecordingFile: meeting.files.length > 0,
+    hasTranscript: Boolean(meeting.transcript),
+    processingError: meeting.processingError ?? undefined,
+  }));
+};
+
 export const addMeetingFile = async (
   meetingId: string,
   file: Omit<MeetingFile, "id" | "meetingId" | "createdAt">,
@@ -286,6 +328,7 @@ export const processMeeting = async (meetingId: string, transcriptText: string, 
       where: { id: meetingId },
       data: {
         status: "processing",
+        processingStage: "saving",
       },
     });
 
@@ -362,6 +405,7 @@ export const processMeeting = async (meetingId: string, transcriptText: string, 
         actionsConfirmed: false,
         processingStartedAt: null,
         processingError: null,
+        processingStage: null,
       },
     });
   });
@@ -386,9 +430,25 @@ export const tryBeginAsyncMeetingProcess = async (meetingId: string): Promise<bo
       status: "processing",
       processingStartedAt: new Date(),
       processingError: null,
+      processingStage: "queued",
     },
   });
   return result.count > 0;
+};
+
+export const setMeetingProcessingStage = async (
+  meetingId: string,
+  stage: NonNullable<Meeting["processingStage"]>,
+): Promise<void> => {
+  await prisma.meeting.update({
+    where: { id: meetingId },
+    data: {
+      status: "processing",
+      processingStage: stage,
+      processingStartedAt: new Date(),
+      processingError: null,
+    },
+  });
 };
 
 export const markMeetingProcessFailed = async (meetingId: string, errorMessage: string) => {
@@ -399,6 +459,7 @@ export const markMeetingProcessFailed = async (meetingId: string, errorMessage: 
       status: "error",
       processingError: truncated,
       processingStartedAt: null,
+      processingStage: null,
     },
   });
 };

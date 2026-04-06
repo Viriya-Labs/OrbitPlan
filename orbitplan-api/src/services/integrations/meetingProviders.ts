@@ -2,13 +2,20 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { env } from "../../config/env.js";
+import { logger } from "../../lib/logger.js";
 import { createAnalysisProvider } from "../analysis/index.js";
 import { createTranscriptionProvider } from "../transcription/index.js";
-import { addMeetingFile, createImportedMeeting, getMeetingById, processMeeting } from "../../storage/meetingsStore.js";
-import type { ImportedMeetingInput, MeetingProviderConnectionStatus, MeetingProviderOAuthToken } from "../../types/meetingProvider.js";
+import { addMeetingFile, createImportedMeeting, getMeetingById, markMeetingProcessFailed, processMeeting } from "../../storage/meetingsStore.js";
+import type {
+  ImportedMeetingInput,
+  MeetingProviderConnectionStatus,
+  MeetingProviderOAuthToken,
+  MeetingProviderSyncResult,
+} from "../../types/meetingProvider.js";
 import type { MeetingProvider } from "../../types/meeting.js";
 import {
   clearMeetingProviderToken,
+  findMeetingProviderConnectionByExternalIdentifiers,
   getMeetingProviderToken,
   saveMeetingProviderToken,
 } from "../../storage/meetingProviderConnectionStore.js";
@@ -83,7 +90,70 @@ const isMimeTypeSupported = (mimeType: string) =>
 
 const sanitizeFileName = (value: string) => value.replace(/[^a-zA-Z0-9._-]/g, "_");
 
-const saveRemoteFile = async (url: string, accessToken: string, preferredName: string) => {
+const fileTypeToExtension = (fileType?: string) => {
+  switch ((fileType ?? "").toLowerCase()) {
+    case "vtt":
+      return "vtt";
+    case "txt":
+      return "txt";
+    case "json":
+      return "json";
+    case "m4a":
+      return "m4a";
+    case "wav":
+      return "wav";
+    case "mp3":
+      return "mp3";
+    case "webm":
+      return "webm";
+    default:
+      return "mp4";
+  }
+};
+
+const fileTypeToMimeType = (value?: string) => {
+  const normalized = value?.toLowerCase();
+  switch (normalized) {
+    case "vtt":
+      return "text/vtt";
+    case "txt":
+      return "text/plain";
+    case "json":
+      return "application/json";
+    case "mp4":
+      return "video/mp4";
+    case "m4a":
+      return "audio/m4a";
+    case "webm":
+      return "video/webm";
+    case "wav":
+      return "audio/wav";
+    case "mp3":
+      return "audio/mpeg";
+    default:
+      return "video/mp4";
+  }
+};
+
+const fetchZoomProfile = async (accessToken: string) => {
+  const response = await fetch("https://api.zoom.us/v2/users/me", {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Zoom profile lookup failed: ${response.status} ${await response.text()}`);
+  }
+
+  return (await response.json()) as {
+    id?: string;
+    account_id?: string;
+    email?: string;
+  };
+};
+
+const saveRemoteFile = async (url: string, accessToken: string, preferredName: string, fallbackMimeType?: string) => {
   const response = await fetch(url, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -95,7 +165,13 @@ const saveRemoteFile = async (url: string, accessToken: string, preferredName: s
   }
 
   const contentType = response.headers.get("content-type") ?? "application/octet-stream";
-  if (!isMimeTypeSupported(contentType)) {
+  const resolvedMimeType =
+    contentType !== "application/octet-stream" && isMimeTypeSupported(contentType)
+      ? contentType
+      : fallbackMimeType && isMimeTypeSupported(fallbackMimeType)
+        ? fallbackMimeType
+        : contentType;
+  if (!isMimeTypeSupported(resolvedMimeType)) {
     throw new MeetingProviderIntegrationError(`Unsupported provider media format: ${contentType}`, 400);
   }
 
@@ -106,9 +182,108 @@ const saveRemoteFile = async (url: string, accessToken: string, preferredName: s
 
   return {
     path: filePath,
-    mimeType: contentType,
+    mimeType: resolvedMimeType,
     size: bytes.byteLength,
   };
+};
+
+const downloadRemoteText = async (url: string, accessToken: string) => {
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new MeetingProviderIntegrationError(`Failed to download provider transcript: ${await response.text()}`, response.status);
+  }
+
+  return response.text();
+};
+
+const toZoomDate = (value: Date) => value.toISOString().slice(0, 10);
+
+const subtractMonthsUtc = (value: Date, months: number) =>
+  new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth() - months, value.getUTCDate()));
+
+type ZoomRecordingMeeting = {
+  id?: number | string;
+  uuid?: string;
+  topic?: string;
+  start_time?: string;
+  host_email?: string;
+  share_url?: string;
+  recording_files?: Array<{
+    id?: string;
+    file_type?: string;
+    file_extension?: string;
+    recording_type?: string;
+    download_url?: string;
+  }>;
+};
+
+type ZoomRecordingFile = NonNullable<ZoomRecordingMeeting["recording_files"]>[number];
+
+const isTranscriptRecordingFile = (file: ZoomRecordingFile) => {
+  const fileType = (file.file_type ?? file.file_extension ?? "").toLowerCase();
+  const recordingType = (file.recording_type ?? "").toLowerCase();
+  return fileType === "vtt" || fileType === "txt" || fileType === "json" || recordingType.includes("transcript");
+};
+
+const selectZoomRecordingFile = (files?: ZoomRecordingMeeting["recording_files"]) =>
+  files?.find((entry) => entry.download_url && !isTranscriptRecordingFile(entry));
+
+const selectZoomTranscriptFile = (files?: ZoomRecordingMeeting["recording_files"]) =>
+  files?.find((entry) => entry.download_url && isTranscriptRecordingFile(entry));
+
+const listZoomRecordings = async (accessToken: string): Promise<ZoomRecordingMeeting[]> => {
+  const now = new Date();
+  const windows = Array.from({ length: 6 }, (_, index) => {
+    const fromDate = subtractMonthsUtc(now, index + 1);
+    const toDate = subtractMonthsUtc(now, index);
+    return {
+      from: toZoomDate(fromDate),
+      to: toZoomDate(toDate),
+    };
+  });
+
+  const meetings = new Map<string, ZoomRecordingMeeting>();
+
+  for (const window of windows) {
+    let nextPageToken = "";
+
+    do {
+      const params = new URLSearchParams({
+        page_size: "100",
+        from: window.from,
+        to: window.to,
+      });
+      if (nextPageToken) params.set("next_page_token", nextPageToken);
+
+      const response = await fetch(`https://api.zoom.us/v2/users/me/recordings?${params.toString()}`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+      if (!response.ok) {
+        throw new MeetingProviderIntegrationError(`Zoom recordings sync failed: ${await response.text()}`, response.status);
+      }
+
+      const body = (await response.json()) as {
+        meetings?: ZoomRecordingMeeting[];
+        next_page_token?: string;
+      };
+
+      for (const meeting of body.meetings ?? []) {
+        if (!meeting.id) continue;
+        meetings.set(String(meeting.id), meeting);
+      }
+
+      nextPageToken = body.next_page_token ?? "";
+    } while (nextPageToken);
+  }
+
+  return [...meetings.values()];
 };
 
 const analyzeTranscript = async (meetingId: string, title: string, attendees: string[], transcriptText: string) => {
@@ -126,6 +301,7 @@ type ProviderHandler = {
   getAuthorizationUrl(userId: string): string;
   handleCallback(code: string, state?: string): Promise<void>;
   disconnect(userId: string): Promise<{ ok: true }>;
+  syncInbox(userId: string): Promise<MeetingProviderSyncResult>;
   importMeeting(userId: string, payload: ImportedMeetingInput): Promise<unknown>;
   handleWebhook(body: unknown, headers: Record<string, string | string[] | undefined>): Promise<{ accepted: boolean }>;
 };
@@ -140,7 +316,19 @@ export class MeetingProviderIntegrationError extends Error {
   }
 }
 
-const zoomScopes = ["recording:read", "meeting:read", "user:read"];
+const defaultZoomScopes = [
+  "cloud_recording:read:recording:admin",
+  "cloud_recording:read:list_user_recordings:admin",
+  "user:read:user:admin",
+];
+
+const getZoomScopes = () => {
+  if (env.zoomScopes === undefined) return defaultZoomScopes;
+  return env.zoomScopes
+    .split(/[,\s]+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+};
 
 const teamsScopes = [
   "offline_access",
@@ -186,6 +374,7 @@ const zoomProvider: ProviderHandler = {
 
   getAuthorizationUrl(userId) {
     ensureConfig("zoom");
+    const zoomScopes = getZoomScopes();
     const params = new URLSearchParams({
       response_type: "code",
       client_id: env.zoomClientId ?? "",
@@ -195,7 +384,13 @@ const zoomProvider: ProviderHandler = {
     if (zoomScopes.length > 0) {
       params.set("scope", zoomScopes.join(" "));
     }
-    return `${ZOOM_OAUTH_BASE}/authorize?${params.toString()}`;
+    const url = `${ZOOM_OAUTH_BASE}/authorize?${params.toString()}`;
+    logger.info("integrations.zoom.oauth.authorize_url_generated", {
+      redirectUri: env.zoomRedirectUri,
+      requestedScopes: zoomScopes,
+      hasScopeParam: zoomScopes.length > 0,
+    });
+    return url;
   },
 
   async handleCallback(code, state) {
@@ -225,18 +420,119 @@ const zoomProvider: ProviderHandler = {
       scope?: string;
       uid?: string;
     };
+    let zoomProfile:
+      | {
+          id?: string;
+          account_id?: string;
+          email?: string;
+        }
+      | undefined;
+    try {
+      zoomProfile = await fetchZoomProfile(body.access_token);
+    } catch (error) {
+      logger.warn("integrations.zoom.profile_lookup_failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     await saveMeetingProviderToken("zoom", userId, {
       accessToken: body.access_token,
       refreshToken: body.refresh_token,
       expiresAt: new Date(Date.now() + body.expires_in * 1000).toISOString(),
       scope: body.scope,
-      externalUserId: body.uid,
+      externalUserId: zoomProfile?.account_id ?? body.uid,
+      externalEmail: zoomProfile?.email,
+      metadata: {
+        zoomAccountId: zoomProfile?.account_id,
+        zoomUserId: zoomProfile?.id ?? body.uid,
+      },
     });
   },
 
   async disconnect(userId) {
     await clearMeetingProviderToken("zoom", userId);
     return { ok: true };
+  },
+
+  async syncInbox(userId) {
+    const token = await withTokenRefresh("zoom", userId, async (current) => {
+      const auth = Buffer.from(`${env.zoomClientId}:${env.zoomClientSecret}`).toString("base64");
+      const response = await fetch(`${ZOOM_OAUTH_BASE}/token`, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${auth}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: current.refreshToken ?? "",
+        }),
+      });
+      if (!response.ok) {
+        throw new MeetingProviderIntegrationError(`Zoom token refresh failed: ${await response.text()}`, response.status);
+      }
+      const body = (await response.json()) as {
+        access_token: string;
+        refresh_token?: string;
+        expires_in: number;
+        scope?: string;
+      };
+      return {
+        accessToken: body.access_token,
+        refreshToken: body.refresh_token ?? current.refreshToken,
+        expiresAt: new Date(Date.now() + body.expires_in * 1000).toISOString(),
+        scope: body.scope ?? current.scope,
+        externalUserId: current.externalUserId,
+        externalEmail: current.externalEmail,
+        metadata: current.metadata,
+      };
+    });
+
+    const meetings = await listZoomRecordings(token.accessToken);
+
+    let imported = 0;
+    let skipped = 0;
+    for (const meeting of meetings) {
+      const recording = selectZoomRecordingFile(meeting.recording_files);
+      const transcriptFile = selectZoomTranscriptFile(meeting.recording_files);
+      if (!meeting.id || (!recording?.download_url && !transcriptFile?.download_url)) {
+        skipped += 1;
+        continue;
+      }
+
+      try {
+        const transcriptText = transcriptFile?.download_url
+          ? await downloadRemoteText(transcriptFile.download_url, token.accessToken)
+          : undefined;
+        await zoomProvider.importMeeting(userId, {
+          provider: "zoom",
+          title: meeting.topic ?? "Zoom Meeting",
+          scheduledAt: meeting.start_time,
+          organizerEmail: meeting.host_email,
+          externalMeetingId: String(meeting.id),
+          externalRecordId: recording?.id ?? transcriptFile?.id ?? meeting.uuid ?? String(meeting.id),
+          externalUrl: meeting.share_url,
+          transcriptText: transcriptText?.trim() || undefined,
+          recordingUrl: recording?.download_url,
+          mimeType: recording ? fileTypeToMimeType(recording.file_extension ?? recording.file_type) : undefined,
+          fileName: recording
+            ? `${meeting.topic ?? "zoom-meeting"}.${fileTypeToExtension(recording.file_extension ?? recording.file_type)}`
+            : undefined,
+        });
+        imported += 1;
+      } catch (error) {
+        logger.warn("integrations.zoom.sync.import_failed", {
+          meetingId: String(meeting.id),
+          message: error instanceof Error ? error.message : String(error),
+        });
+        skipped += 1;
+      }
+    }
+
+    return {
+      imported,
+      skipped,
+      total: meetings.length,
+    };
   },
 
   async importMeeting(userId, payload) {
@@ -289,6 +585,7 @@ const zoomProvider: ProviderHandler = {
           id?: string | number;
           topic?: string;
           start_time?: string;
+          host_id?: string;
           host_email?: string;
           join_url?: string;
           participants?: Array<{ user_email?: string }>;
@@ -308,12 +605,16 @@ const zoomProvider: ProviderHandler = {
     }
 
     const object = payload.payload?.object;
-    const recording = object?.recording_files?.find((entry) => entry.download_url);
-    if (!object?.id || !recording?.download_url) {
+    const recording = selectZoomRecordingFile(object?.recording_files);
+    const transcriptFile = selectZoomTranscriptFile(object?.recording_files);
+    if (!object?.id || (!recording?.download_url && !transcriptFile?.download_url)) {
       return { accepted: true };
     }
 
-    const connection = await prismaMeetingProviderConnectionByExternal("zoom", payload.payload?.account_id);
+    const connection = await findMeetingProviderConnectionByExternalIdentifiers("zoom", [
+      payload.payload?.account_id ?? "",
+      object.host_id ?? "",
+    ]);
     if (!connection) return { accepted: true };
 
     await zoomProvider.importMeeting(connection.userId, {
@@ -323,11 +624,11 @@ const zoomProvider: ProviderHandler = {
       attendees: (object.participants ?? []).map((item) => item.user_email).filter((value): value is string => Boolean(value)),
       organizerEmail: object.host_email,
       externalMeetingId: String(object.id),
-      externalRecordId: recording.id,
+      externalRecordId: recording?.id ?? transcriptFile?.id,
       externalUrl: object.join_url,
-      recordingUrl: recording.download_url,
-      mimeType: fileTypeToMimeType(recording.file_extension ?? recording.file_type),
-      fileName: `${object.topic ?? "zoom-meeting"}.${(recording.file_extension ?? "mp4").toLowerCase()}`,
+      recordingUrl: recording?.download_url,
+      mimeType: recording ? fileTypeToMimeType(recording.file_extension ?? recording.file_type) : undefined,
+      fileName: recording ? `${object.topic ?? "zoom-meeting"}.${(recording.file_extension ?? "mp4").toLowerCase()}` : undefined,
     });
 
     return { accepted: true };
@@ -410,6 +711,15 @@ const teamsProvider: ProviderHandler = {
     return { ok: true };
   },
 
+  async syncInbox(userId) {
+    void userId;
+    return {
+      imported: 0,
+      skipped: 0,
+      total: 0,
+    };
+  },
+
   async importMeeting(userId, payload) {
     const token = await withTokenRefresh("teams", userId, async (current) => {
       const response = await fetch(`${MICROSOFT_LOGIN_BASE}/${env.microsoftTenantId}/oauth2/v2.0/token`, {
@@ -477,7 +787,7 @@ const teamsProvider: ProviderHandler = {
     for (const item of payload.value ?? []) {
       const data = item.resourceData;
       if (!data?.meetingId || !data.id) continue;
-      const connection = await prismaMeetingProviderConnectionByExternal("teams", data.organizer?.user?.id);
+      const connection = await findMeetingProviderConnectionByExternalIdentifiers("teams", [data.organizer?.user?.id ?? ""]);
       if (!connection) continue;
 
       await teamsProvider.importMeeting(connection.userId, {
@@ -503,38 +813,6 @@ const providers: Record<MeetingProvider, ProviderHandler> = {
   teams: teamsProvider,
 };
 
-const fileTypeToMimeType = (value?: string) => {
-  const normalized = value?.toLowerCase();
-  switch (normalized) {
-    case "mp4":
-      return "video/mp4";
-    case "m4a":
-      return "audio/m4a";
-    case "webm":
-      return "video/webm";
-    case "wav":
-      return "audio/wav";
-    case "mp3":
-      return "audio/mpeg";
-    default:
-      return "video/mp4";
-  }
-};
-
-const prismaMeetingProviderConnectionByExternal = async (provider: MeetingProvider, externalUserId?: string) => {
-  if (!externalUserId) return null;
-  const { prisma } = await import("../../lib/prisma.js");
-  return prisma.meetingProviderConnection.findFirst({
-    where: {
-      provider,
-      externalUserId,
-    },
-    select: {
-      userId: true,
-    },
-  });
-};
-
 const importMeetingPayload = async (payload: ImportedMeetingInput, accessToken: string) => {
   const created = await createImportedMeeting({
     title: payload.title,
@@ -548,33 +826,46 @@ const importMeetingPayload = async (payload: ImportedMeetingInput, accessToken: 
   });
 
   const meetingId = created.meeting.id;
-  if (payload.transcriptText) {
-    const processed = await analyzeTranscript(meetingId, created.meeting.title, created.meeting.attendees, payload.transcriptText);
-    return processed ?? created;
-  }
+  try {
+    if (payload.transcriptText) {
+      const processed = await analyzeTranscript(meetingId, created.meeting.title, created.meeting.attendees, payload.transcriptText);
+      return processed ?? created;
+    }
 
-  if (payload.recordingUrl) {
-    const saved = await saveRemoteFile(
-      payload.recordingUrl,
-      accessToken,
-      payload.fileName ?? `${payload.provider}-${payload.externalMeetingId}.mp4`,
-    );
-    await addMeetingFile(meetingId, {
-      originalName: path.basename(saved.path),
-      mimeType: payload.mimeType ?? saved.mimeType,
-      size: saved.size,
-      path: saved.path,
-    });
-    const transcriptionProvider = createTranscriptionProvider();
-    const transcript = await transcriptionProvider.transcribe({
-      filePath: saved.path,
-      mimeType: payload.mimeType ?? saved.mimeType,
-    });
-    const processed = await analyzeTranscript(meetingId, created.meeting.title, created.meeting.attendees, transcript.text);
-    return processed ?? (await getMeetingById(meetingId)) ?? created;
-  }
+    if (payload.recordingUrl) {
+      const saved = await saveRemoteFile(
+        payload.recordingUrl,
+        accessToken,
+        payload.fileName ?? `${payload.provider}-${payload.externalMeetingId}.mp4`,
+        payload.mimeType,
+      );
+      await addMeetingFile(meetingId, {
+        originalName: path.basename(saved.path),
+        mimeType: payload.mimeType ?? saved.mimeType,
+        size: saved.size,
+        path: saved.path,
+      });
+      const transcriptionProvider = createTranscriptionProvider();
+      const transcript = await transcriptionProvider.transcribe({
+        filePath: saved.path,
+        mimeType: payload.mimeType ?? saved.mimeType,
+      });
+      const processed = await analyzeTranscript(meetingId, created.meeting.title, created.meeting.attendees, transcript.text);
+      return processed ?? (await getMeetingById(meetingId)) ?? created;
+    }
 
-  return getMeetingById(meetingId);
+    return getMeetingById(meetingId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Provider import failed";
+    logger.error("integrations.meeting_provider.import_failed", {
+      provider: payload.provider,
+      meetingId,
+      externalMeetingId: payload.externalMeetingId,
+      message,
+    });
+    await markMeetingProcessFailed(meetingId, message);
+    throw error;
+  }
 };
 
 export const meetingProviders = {

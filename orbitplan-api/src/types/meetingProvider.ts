@@ -17,6 +17,27 @@ export type MeetingProviderConnectionStatus = {
   externalEmail?: string;
 };
 
+export type MeetingProviderInboxItem = {
+  id: string;
+  provider: MeetingProvider;
+  title: string;
+  status: "created" | "processing" | "ready" | "approved" | "error";
+  createdAt: string;
+  scheduledAt?: string;
+  organizerEmail?: string;
+  externalUrl?: string;
+  attendeeCount: number;
+  hasRecordingFile: boolean;
+  hasTranscript: boolean;
+  processingError?: string;
+};
+
+export type MeetingProviderSyncResult = {
+  imported: number;
+  skipped: number;
+  total: number;
+};
+
 export type ImportedMeetingInput = {
   provider: MeetingProvider;
   title: string;

@@ -15,6 +15,7 @@ import {
   getMeetingById,
   getLatestMeetingFile,
   processMeeting,
+  setMeetingProcessingStage,
   tryBeginAsyncMeetingProcess,
   updateMeetingAction,
 } from "../storage/meetingsStore.js";
@@ -231,8 +232,10 @@ export const processMeetingHandler = async (req: Request, res: Response) => {
       analysisProvider: env.analysisProvider,
     });
 
+    await setMeetingProcessingStage(meetingId, "preparing_media");
     const provider = createTranscriptionProvider();
     const tTranscribe = performance.now();
+    await setMeetingProcessingStage(meetingId, "transcribing");
     const transcript = await withTimeout(
       provider.transcribe({
         filePath: latestFile.path,
@@ -249,6 +252,7 @@ export const processMeetingHandler = async (req: Request, res: Response) => {
 
     const analysisProvider = createAnalysisProvider();
     const tAnalyze = performance.now();
+    await setMeetingProcessingStage(meetingId, "analyzing");
     const analysis = await withTimeout(
       analysisProvider.analyze({
         meetingTitle: meeting.meeting.title,
@@ -265,6 +269,7 @@ export const processMeetingHandler = async (req: Request, res: Response) => {
     });
 
     const tPersist = performance.now();
+    await setMeetingProcessingStage(meetingId, "saving");
     const processed = await processMeeting(req.params.id, transcript.text, analysis);
     if (!processed) {
       return res.status(404).json({ error: "Meeting not found" });

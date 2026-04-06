@@ -75,6 +75,8 @@ model Meeting {
   processingError  String?
   /// When async processing started; used to detect stale locks (e.g. server crash).
   processingStartedAt DateTime?
+  /// Current processing step shown in the UI while a meeting is being worked on.
+  processingStage String?
 
   files            MeetingFile[]
   transcript       MeetingTranscript?

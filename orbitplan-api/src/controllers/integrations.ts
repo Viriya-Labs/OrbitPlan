@@ -3,6 +3,7 @@ import { z } from "zod";
 import { ExecutionError, executionService } from "../services/execution/index.js";
 import { JiraIntegrationError, jiraIntegration } from "../services/integrations/jira.js";
 import { MeetingProviderIntegrationError, meetingProviders } from "../services/integrations/meetingProviders.js";
+import { listImportedMeetingsByProvider } from "../storage/meetingsStore.js";
 import type { MeetingProvider } from "../types/meeting.js";
 
 const JiraExportSchema = z.object({
@@ -262,6 +263,25 @@ export const getMeetingProviderAuthUrlHandler = async (req: Request, res: Respon
   try {
     const provider = getProvider(req.params.provider);
     return res.status(200).json({ url: provider.getAuthorizationUrl(req.authSession!.user.id) });
+  } catch (error) {
+    return handleMeetingProviderError(res, error);
+  }
+};
+
+export const listMeetingProviderInboxHandler = async (req: Request, res: Response) => {
+  try {
+    return res.status(200).json({
+      items: await listImportedMeetingsByProvider(req.params.provider as MeetingProvider),
+    });
+  } catch (error) {
+    return handleMeetingProviderError(res, error);
+  }
+};
+
+export const syncMeetingProviderInboxHandler = async (req: Request, res: Response) => {
+  try {
+    const provider = getProvider(req.params.provider);
+    return res.status(200).json(await provider.syncInbox(req.authSession!.user.id));
   } catch (error) {
     return handleMeetingProviderError(res, error);
   }

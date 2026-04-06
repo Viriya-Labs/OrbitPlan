@@ -4,6 +4,7 @@ import type { ActionPriority, ActionStatus } from "@/types/action";
 import type { AuthUser } from "@/types/auth";
 import type { EmailExportResult } from "@/types/execution";
 import type { JiraExportResult, JiraIntegrationStatus, JiraIssueTypeCreateMeta, JiraLookupItem, JiraProject, JiraScanResult, JiraSite } from "@/types/jira";
+import type { MeetingProvider, MeetingProviderInboxItem, MeetingProviderIntegrationStatus, MeetingProviderSyncResult } from "@/types/meetingProvider";
 import type { Meeting } from "@/types/meeting";
 import type { MeetingChatHistoryResponse, MeetingChatResponse } from "@/types/chat";
 import type { MeetingDetail } from "@/types/meetingDetail";
@@ -109,10 +110,14 @@ export const uploadMeetingFile = async (meetingId: string, file: File) => {
 const POLL_INTERVAL_MS = 2000;
 const POLL_MAX_MS = 20 * 60 * 1000;
 
-const pollMeetingUntilProcessed = async (meetingId: string): Promise<MeetingDetail> => {
+const pollMeetingUntilProcessed = async (
+  meetingId: string,
+  onPoll?: (detail: MeetingDetail) => void,
+): Promise<MeetingDetail> => {
   const deadline = Date.now() + POLL_MAX_MS;
   while (Date.now() < deadline) {
     const detail = await getMeeting(meetingId);
+    onPoll?.(detail);
     const status = detail.meeting.status;
     if (status === "ready") return detail;
     if (status === "error") {
@@ -131,14 +136,17 @@ const pollMeetingUntilProcessed = async (meetingId: string): Promise<MeetingDeta
  * Starts async processing (202) and polls until ready/error.
  * Use `processMeetingSync` for blocking behavior (e.g. curl scripts): POST .../process?wait=true
  */
-export const processMeeting = async (meetingId: string): Promise<MeetingDetail> => {
+export const processMeeting = async (
+  meetingId: string,
+  onPoll?: (detail: MeetingDetail) => void,
+): Promise<MeetingDetail> => {
   const response = await apiFetch(`${config.apiBaseUrl}/api/meetings/${meetingId}/process`, {
     method: "POST",
   });
 
   if (response.status === 202) {
     await response.json().catch(() => ({}));
-    return pollMeetingUntilProcessed(meetingId);
+    return pollMeetingUntilProcessed(meetingId, onPoll);
   }
 
   if (!response.ok) return toError(response);
@@ -259,6 +267,43 @@ export const getJiraStatus = async (): Promise<JiraIntegrationStatus> => {
   const response = await apiFetch(`${config.apiBaseUrl}/api/integrations/jira/status`, { cache: "no-store" });
   if (!response.ok) return toError(response);
   return (await response.json()) as JiraIntegrationStatus;
+};
+
+export const getMeetingProviderStatus = async (
+  provider: MeetingProvider,
+): Promise<MeetingProviderIntegrationStatus> => {
+  const response = await apiFetch(`${config.apiBaseUrl}/api/integrations/${provider}/status`, { cache: "no-store" });
+  if (!response.ok) return toError(response);
+  return (await response.json()) as MeetingProviderIntegrationStatus;
+};
+
+export const getMeetingProviderAuthUrl = async (provider: MeetingProvider): Promise<string> => {
+  const response = await apiFetch(`${config.apiBaseUrl}/api/integrations/${provider}/auth-url`, { cache: "no-store" });
+  if (!response.ok) return toError(response);
+  const data = (await response.json()) as { url: string };
+  return data.url;
+};
+
+export const disconnectMeetingProvider = async (provider: MeetingProvider): Promise<void> => {
+  const response = await apiFetch(`${config.apiBaseUrl}/api/integrations/${provider}/disconnect`, {
+    method: "POST",
+  });
+  if (!response.ok) return toError(response);
+};
+
+export const getMeetingProviderInbox = async (provider: MeetingProvider): Promise<MeetingProviderInboxItem[]> => {
+  const response = await apiFetch(`${config.apiBaseUrl}/api/integrations/${provider}/meetings`, { cache: "no-store" });
+  if (!response.ok) return toError(response);
+  const data = (await response.json()) as { items: MeetingProviderInboxItem[] };
+  return data.items;
+};
+
+export const syncMeetingProviderInbox = async (provider: MeetingProvider): Promise<MeetingProviderSyncResult> => {
+  const response = await apiFetch(`${config.apiBaseUrl}/api/integrations/${provider}/sync`, {
+    method: "POST",
+  });
+  if (!response.ok) return toError(response);
+  return (await response.json()) as MeetingProviderSyncResult;
 };
 
 export const getJiraAuthUrl = async (): Promise<string> => {

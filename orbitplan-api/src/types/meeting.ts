@@ -1,6 +1,7 @@
 export type MeetingSource = "upload" | "record";
 export type MeetingProvider = "zoom" | "teams";
 export type MeetingStatus = "created" | "processing" | "ready" | "approved" | "error";
+export type MeetingProcessingStage = "queued" | "preparing_media" | "transcribing" | "analyzing" | "saving";
 
 export type Meeting = {
   id: string;
@@ -20,4 +21,6 @@ export type Meeting = {
   processingError?: string;
   /** ISO time when async processing was last started. */
   processingStartedAt?: string;
+  /** Human-readable processing step for live progress updates. */
+  processingStage?: MeetingProcessingStage;
 };

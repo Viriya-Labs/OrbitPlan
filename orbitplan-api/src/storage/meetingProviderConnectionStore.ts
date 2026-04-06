@@ -80,3 +80,37 @@ export const clearMeetingProviderToken = async (provider: MeetingProvider, userI
     },
   });
 };
+
+export const findMeetingProviderConnectionByExternalIdentifiers = async (
+  provider: MeetingProvider,
+  identifiers: string[],
+): Promise<{ userId: string } | null> => {
+  const values = identifiers.map((value) => value.trim()).filter(Boolean);
+  if (values.length === 0) return null;
+
+  const connections = await prisma.meetingProviderConnection.findMany({
+    where: { provider },
+    select: {
+      userId: true,
+      externalUserId: true,
+      metadata: true,
+    },
+  });
+
+  const wanted = new Set(values);
+  for (const connection of connections) {
+    const metadata =
+      typeof connection.metadata === "object" && connection.metadata ? (connection.metadata as Record<string, unknown>) : {};
+    const candidates = [
+      connection.externalUserId,
+      typeof metadata.zoomAccountId === "string" ? metadata.zoomAccountId : undefined,
+      typeof metadata.zoomUserId === "string" ? metadata.zoomUserId : undefined,
+    ].filter((value): value is string => Boolean(value));
+
+    if (candidates.some((candidate) => wanted.has(candidate))) {
+      return { userId: connection.userId };
+    }
+  }
+
+  return null;
+};

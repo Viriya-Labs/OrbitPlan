@@ -6,6 +6,7 @@ import {
   getMeetingById,
   markMeetingProcessFailed,
   processMeeting,
+  setMeetingProcessingStage,
 } from "../storage/meetingsStore.js";
 import { createAnalysisProvider } from "../services/analysis/index.js";
 import { createTranscriptionProvider } from "../services/transcription/index.js";
@@ -110,8 +111,10 @@ export const runMeetingProcessJob = async (meetingId: string): Promise<void> => 
   });
 
   try {
+    await setMeetingProcessingStage(meetingId, "preparing_media");
     const provider = createTranscriptionProvider();
     const t1 = performance.now();
+    await setMeetingProcessingStage(meetingId, "transcribing");
     const transcript = await withTimeout(
       provider.transcribe({
         filePath: latestFile.path,
@@ -128,6 +131,7 @@ export const runMeetingProcessJob = async (meetingId: string): Promise<void> => 
 
     const analysisProvider = createAnalysisProvider();
     const t2 = performance.now();
+    await setMeetingProcessingStage(meetingId, "analyzing");
     const analysis = await withTimeout(
       analysisProvider.analyze({
         meetingTitle: snapshot.meeting.title,
@@ -143,6 +147,7 @@ export const runMeetingProcessJob = async (meetingId: string): Promise<void> => 
       actionCount: analysis.actions.length,
     });
 
+    await setMeetingProcessingStage(meetingId, "saving");
     const processed = await processMeeting(meetingId, transcript.text, analysis);
     if (!processed) {
       await markMeetingProcessFailed(meetingId, "Meeting not found after processing.");

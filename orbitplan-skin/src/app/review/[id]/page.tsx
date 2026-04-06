@@ -36,6 +36,7 @@ import {
   getProcessingErrorMessage,
   processMeeting,
   resyncMeetingAction,
+  syncMeetingProviderInbox,
   updateMeetingAction,
 } from "@/lib/api";
 import type { ActionPriority, ActionStatus } from "@/types/action";
@@ -57,6 +58,29 @@ const statusTone = (status: string): "neutral" | "success" | "warning" => {
   if (status === "approved") return "success";
   if (status === "ready") return "warning";
   return "neutral";
+};
+
+const formatProviderLabel = (provider?: "zoom" | "teams") => {
+  if (provider === "zoom") return "Zoom";
+  if (provider === "teams") return "Microsoft Teams";
+  return "Imported meeting";
+};
+
+const formatProcessingStage = (stage?: string) => {
+  switch (stage) {
+    case "queued":
+      return "Queued for processing";
+    case "preparing_media":
+      return "Preparing recording";
+    case "transcribing":
+      return "Transcribing audio";
+    case "analyzing":
+      return "Generating summary and actions";
+    case "saving":
+      return "Saving results";
+    default:
+      return "Waiting to start";
+  }
 };
 
 type WorkspaceTab = "summary" | "chat";
@@ -420,6 +444,7 @@ export default function ReviewPage() {
   const [loading, setLoading] = useState(true);
   const [approving, setApproving] = useState(false);
   const [retryingProcess, setRetryingProcess] = useState(false);
+  const [recoveringZoomAssets, setRecoveringZoomAssets] = useState(false);
   const [question, setQuestion] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -587,9 +612,36 @@ export default function ReviewPage() {
       <div className="space-y-6">
         {(!data.transcript?.text || data.meeting.status === "created" || data.meeting.status === "processing") && (
           <Card title="Processing Status" subtitle="Retry if AI processing failed or timed out">
-            <Button variant="secondary" onClick={handleRetryProcessing} disabled={retryingProcess}>
-              {retryingProcess ? "Retrying..." : "Retry Processing"}
-            </Button>
+            <div className="mb-3 rounded-xl border border-[rgba(120,145,255,0.18)] bg-[rgba(120,145,255,0.08)] p-3 text-sm text-[var(--text-secondary)]">
+              <p className="font-semibold text-[var(--text-primary)]">
+                {data.meeting.status === "processing"
+                  ? formatProcessingStage(data.meeting.processingStage)
+                  : data.files.length > 0
+                    ? "Recording ready for transcription"
+                    : "Recording not attached yet"}
+              </p>
+              <p className="mt-1">
+                {data.meeting.status === "processing"
+                  ? "OrbitPlan will keep updating this stage while the current run is in progress."
+                  : data.files.length > 0
+                    ? "Start transcription when you are ready."
+                    : "Fetch the Zoom recording first before starting transcription."}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {data.meeting.provider === "zoom" && (
+                <Button variant="secondary" onClick={handleFetchFromZoom} disabled={recoveringZoomAssets}>
+                  {recoveringZoomAssets ? "Fetching from Zoom..." : "Fetch from Zoom"}
+                </Button>
+              )}
+              <Button
+                variant="secondary"
+                onClick={handleRetryProcessing}
+                disabled={retryingProcess || recoveringZoomAssets || data.files.length === 0}
+              >
+                {retryingProcess ? "Transcribing..." : "Transcribe Recording"}
+              </Button>
+            </div>
           </Card>
         )}
 
@@ -1794,6 +1846,25 @@ export default function ReviewPage() {
   }, [id]);
 
   useEffect(() => {
+    const meetingId = data?.meeting.id;
+    const meetingStatus = data?.meeting.status;
+    if (!meetingId || meetingStatus !== "processing") return;
+
+    const interval = window.setInterval(async () => {
+      try {
+        const refreshed = await getMeeting(meetingId);
+        setData(refreshed);
+      } catch {
+        // Keep the last known state if a background refresh fails.
+      }
+    }, 2000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [data?.meeting.id, data?.meeting.status]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(
       `orbitplan:jira-ticket-details:${id}`,
@@ -2078,12 +2149,26 @@ export default function ReviewPage() {
     setError(null);
     setRetryingProcess(true);
     try {
-      const updated = await processMeeting(data.meeting.id);
+      const updated = await processMeeting(data.meeting.id, (detail) => setData(detail));
       setData(updated);
     } catch (retryError) {
       setError(getProcessingErrorMessage(retryError));
     } finally {
       setRetryingProcess(false);
+    }
+  };
+
+  const handleFetchFromZoom = async () => {
+    if (!data || data.meeting.provider !== "zoom") return;
+    setError(null);
+    setRecoveringZoomAssets(true);
+    try {
+      await syncMeetingProviderInbox("zoom");
+      setData(await getMeeting(data.meeting.id));
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Failed to fetch recording from Zoom");
+    } finally {
+      setRecoveringZoomAssets(false);
     }
   };
 
@@ -2999,9 +3084,45 @@ export default function ReviewPage() {
               subtitle={new Date(data.meeting.createdAt).toLocaleString()}
               rightSlot={<StatusPill label={data.meeting.status.toUpperCase()} tone={statusTone(data.meeting.status)} />}
             >
-              <p className="text-sm text-[var(--text-secondary)]">
-                Attendees: {data.meeting.attendees.join(", ") || "none"}
-              </p>
+              <div className="space-y-3 text-sm text-[var(--text-secondary)]">
+                <p>Attendees: {data.meeting.attendees.join(", ") || "none"}</p>
+                {data.meeting.source === "record" && (
+                  <div className="rounded-xl border border-[rgba(120,145,255,0.2)] bg-[rgba(120,145,255,0.08)] p-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <StatusPill
+                        label={`${formatProviderLabel(data.meeting.provider)} import`}
+                        tone="success"
+                      />
+                      <StatusPill
+                        label={data.files.length > 0 ? "Recording attached" : "Recording pending"}
+                        tone={data.files.length > 0 ? "success" : "warning"}
+                      />
+                      <StatusPill
+                        label={data.transcript?.text ? "Transcript ready" : "Transcript pending"}
+                        tone={data.transcript?.text ? "success" : "warning"}
+                      />
+                    </div>
+                    <div className="mt-3 grid gap-2 md:grid-cols-2">
+                      <p>Source: {formatProviderLabel(data.meeting.provider)}</p>
+                      <p>Host: {data.meeting.organizerEmail ?? "Not provided by provider"}</p>
+                      <p>Meeting ID: {data.meeting.externalMeetingId ?? "Not available"}</p>
+                      <p>Recording ref: {data.meeting.externalRecordId ?? "Not available"}</p>
+                    </div>
+                    {data.meeting.externalUrl && (
+                      <div className="mt-3">
+                        <a
+                          href={data.meeting.externalUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)] transition hover:bg-[var(--surface-muted)]"
+                        >
+                          Open Original Recording
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </Card>
 
             <Card
@@ -3025,9 +3146,45 @@ export default function ReviewPage() {
                 </div>
               }
             >
-              <p className="max-h-72 overflow-auto whitespace-pre-wrap rounded-xl bg-[var(--surface-strong)] p-4 text-sm text-[var(--text-secondary)]">
-                {data.transcript?.text ?? "No transcript"}
-              </p>
+              {data.transcript?.text ? (
+                <p className="max-h-72 overflow-auto whitespace-pre-wrap rounded-xl bg-[var(--surface-strong)] p-4 text-sm text-[var(--text-secondary)]">
+                  {data.transcript.text}
+                </p>
+              ) : (
+                <div className="space-y-3 rounded-xl border border-[rgba(255,184,76,0.28)] bg-[rgba(255,184,76,0.08)] p-4 text-sm text-[var(--text-secondary)]">
+                  <p className="font-semibold text-[var(--text-primary)]">Transcript not available yet</p>
+                  {recoveringZoomAssets && (
+                    <p className="rounded-lg border border-[rgba(120,145,255,0.22)] bg-[rgba(120,145,255,0.08)] px-3 py-2 text-[var(--text-primary)]">
+                      OrbitPlan is fetching the recording from Zoom now.
+                    </p>
+                  )}
+                  <p>
+                    {data.meeting.source === "record"
+                      ? `This review was opened from the ${formatProviderLabel(data.meeting.provider)} inbox, but OrbitPlan has not saved a transcript for it yet.`
+                      : "OrbitPlan has not saved a transcript for this meeting yet."}
+                  </p>
+                  <p>
+                    {data.files.length > 0
+                      ? "A recording file is attached. Click Transcribe Recording when you want OrbitPlan to generate the transcript and summary."
+                      : "No recording file is attached yet. Click Fetch from Zoom first, then transcribe once the recording is attached."}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {data.meeting.provider === "zoom" && data.files.length === 0 && (
+                      <Button variant="secondary" onClick={handleFetchFromZoom} disabled={recoveringZoomAssets}>
+                        {recoveringZoomAssets ? "Fetching from Zoom..." : "Fetch from Zoom"}
+                      </Button>
+                    )}
+                    <Button
+                      variant="secondary"
+                      onClick={handleRetryProcessing}
+                      disabled={retryingProcess || recoveringZoomAssets || data.files.length === 0}
+                    >
+                      {retryingProcess ? "Transcribing..." : "Transcribe Recording"}
+                    </Button>
+                  </div>
+                  {data.meeting.processingError && <p className="text-[var(--danger)]">Last processing error: {data.meeting.processingError}</p>}
+                </div>
+              )}
             </Card>
 
             <Card title="Intelligence Workspace" subtitle="Switch between summary and AI chat">
